@@ -1,9 +1,13 @@
+import { $ } from "bun";
+import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
+
 try {
   const logPath = '../mainrun/logs/mainrun.log'
-  if (await fs.pathExists(logPath)) {
+  if (existsSync(logPath)) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
     const newLogPath = `../mainrun/logs/mainrun_${timestamp}.log`
-    await fs.move(logPath, newLogPath)
+    await fs.rename(logPath, newLogPath)
     console.log(`Moved existing log to: mainrun_${timestamp}.log`)
   }
 
