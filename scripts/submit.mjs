@@ -68,7 +68,7 @@ try {
 
   console.log('Uploading submission...')
 
-  await $`echo ${uploadUrl} | xargs -I {} curl -X PUT {} --upload-file ${zipPath}`
+  await $`curl -X PUT ${uploadUrl} --upload-file ${zipPath}`
 
   await $`rm -f ${zipPath}`
 
