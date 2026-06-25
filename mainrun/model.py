@@ -21,6 +21,7 @@ class GPTConfig:
     rms_eps: float = 1e-5
     swiglu_mult: float = 8 / 3
     qk_norm: bool = False
+    label_smoothing: float = 0.0
 
 
 def title_boundary_attn_mask(idx: torch.Tensor, eos_id: int) -> torch.Tensor:
@@ -143,8 +144,24 @@ class GPT(nn.Module):
         logits = self.head(x)
         if targets is None:
             return logits, None
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction="mean")
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            targets.view(-1),
+            reduction="mean",
+            label_smoothing=self.cfg.label_smoothing if self.training else 0.0,
+        )
         return logits, loss
+
+    def get_optimizer_param_groups(self):
+        muon_params, adamw_params = [], []
+        for name, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim == 2 and "token_emb" not in name and "head" not in name:
+                muon_params.append(p)
+            else:
+                adamw_params.append(p)
+        return muon_params, adamw_params
 
     def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple[float, float], device_type: str):
         decay_params, nodecay_params = [], []
