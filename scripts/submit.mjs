@@ -59,8 +59,8 @@ try {
 
   console.log('Requesting upload URL...')
 
-  const response = await $`curl -s "https://api.hanger.maincode.com/api/v1/upload/request?email=${email}&filename=submission.zip"`
-  const uploadUrl = response.stdout.trim()
+  const response = await $`curl -s "https://api.hanger.maincode.com/api/v1/upload/request?email=${email}&filename=submission.zip"`.text()
+  const uploadUrl = response.trim()
 
   if (!uploadUrl || uploadUrl.includes('error')) {
     throw new Error(`Failed to get upload URL: ${uploadUrl}`)
