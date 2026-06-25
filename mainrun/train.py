@@ -11,7 +11,6 @@ from torch.nn import functional as F
 from torch.optim._muon import Muon
 from tqdm import tqdm
 
-import utils
 from data import BPETokenizer, get_batch, get_titles, iter_full_split, pretokenize_corpus, train_tokenizer
 from model import GPT, GPTConfig
 
