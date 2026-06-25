@@ -26,6 +26,7 @@ class Hyperparameters:
     n_head: int = 12
     d_model: int = 384
     dropout: float = 0.1
+    qk_norm: bool = False
     lr: float = 5e-4
     weight_decay: float = 0.1
     beta1: float = 0.9
@@ -133,6 +134,7 @@ def main():
         d_model=args.d_model,
         dropout=args.dropout,
         eos_id=tok.eos_id,
+        qk_norm=args.qk_norm,
     )
     model = GPT(cfg).to(device)
     logger.log("model_info", parameters_count=sum(p.numel() for p in model.parameters() if p.requires_grad))
