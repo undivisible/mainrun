@@ -25,9 +25,8 @@ class Hyperparameters:
     n_layer: int = 12
     n_head: int = 12
     d_model: int = 384
-    dropout: float = 0.1
-    qk_norm: bool = False
-    lr: float = 5e-4
+    dropout: float = 0.05
+    qk_norm: bool = True
     weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -38,6 +37,7 @@ class Hyperparameters:
     num_titles: int = 100_000
     val_frac: float = 0.10
     log_file: str = "./logs/mainrun.log"
+    run_tag: str = "v1_qknorm_dropout0.05"
     onecycle_pct_start: float = 0.1
     onecycle_div_factor: float = 25.0
     onecycle_final_div_factor: float = 1000.0
@@ -85,6 +85,33 @@ def configure_logging(log_file: str):
                         tqdm.write(event)
 
     return DualLogger(file_handler)
+
+
+def _segment_start_weights(idx: torch.Tensor, eos_id: int, boost: float):
+    if boost <= 1.0:
+        return None
+    B, T = idx.shape
+    eos = idx == eos_id
+    prev_eos = torch.zeros_like(eos)
+    prev_eos[:, 1:] = eos[:, :-1]
+    start = prev_eos | (torch.arange(T, device=idx.device) == 0).view(1, T)
+    w = torch.ones(B, T, device=idx.device, dtype=torch.float32)
+    return torch.where(start, w * boost, w)
+
+
+def _train_ce(model, xb, yb, boost: float, z_coef: float):
+    logits, _ = model(xb, None)
+    B, T, V = logits.shape
+    ce = F.cross_entropy(logits.view(-1, V), yb.view(-1), reduction="none").view(B, T)
+    w = _segment_start_weights(xb, model.cfg.eos_id, boost)
+    if w is None:
+        loss = ce.mean()
+    else:
+        loss = (ce * w).sum() / w.sum()
+    if z_coef > 0:
+        z = torch.logsumexp(logits.float(), dim=-1)
+        loss = loss + z_coef * (z * z).mean()
+    return loss
 
 
 def main():
@@ -135,6 +162,7 @@ def main():
         dropout=args.dropout,
         eos_id=tok.eos_id,
         qk_norm=args.qk_norm,
+        rope_theta=args.rope_theta,
     )
     model = GPT(cfg).to(device)
     logger.log("model_info", parameters_count=sum(p.numel() for p in model.parameters() if p.requires_grad))

@@ -4,93 +4,76 @@
 
 | | Validation loss |
 |---|----------------|
-| Baseline (provided) | **1.754** |
-| **Submission (Run v1)** | **1.234** |
+| Baseline | **1.754** |
+| **Best so far (submit if nothing beats it)** | **1.233613** |
 
-Improvement ≈ **29.6%** relative on the graded metric. Constraints respected: 7 epochs, seed 1337, fixed dataset and val split, no pretraining or augmentation, **`evaluate()` unchanged**.
+~**30%** below baseline. Rules: 7 epochs, seed 1337, same data; **`evaluate()` unchanged**.
 
-Evidence: `logs/run_v1_dropout0.1_accum1.log`, best `validation_step` loss **1.234482** at step 938.
-
----
-
-## Problem and metric
-
-The task is next-token prediction on Hacker News **titles** concatenated with `<eos>`. Validation loss is total cross-entropy over the validation token stream divided by the **character length** of the joined validation text (same as baseline). Improvements must come from architecture, tokenization, optimization, and training dynamics—not from altering that evaluation.
+**Best log:** `logs/run_v1_qknorm.log` (QK norm, dropout 0.1).  
+**Last safe try (you run):** dropout **0.05**, same else → save as `logs/run_v1_do005.log`; submit whichever is lower.
 
 ---
 
-## Approach (Run v1)
+## Time spent (~2–3 hours training on MPS)
 
-I treated this as a **small language model engineering** problem: adopt a modern decoder block, respect the **segment structure** of the corpus, and keep the training schedule aligned with the fixed epoch budget.
-
-### Architecture
-
-- **RMSNorm (pre-norm)** instead of LayerNorm — fewer parameters, stable training at depth 12.
-- **RoPE** on queries and keys — relative position without a learned position embedding table.
-- **SwiGLU** feed-forward — stronger FFN than GELU×4 for similar parameter use.
-- **`scaled_dot_product_attention`** — identical math to manual softmax attention; uses fused kernels where available.
-- **GPT-NeoX parallel block** — attention and FFN branches both read the same normalized residual stream, then add back; often optimizes better than strict serial pre-norm.
-- **Tied embeddings** — `lm_head` shares weights with token embeddings (~27M trainable params total).
-- **Residual projection init** — attention and MLP output linear layers initialized with std `0.02 / √(2 × n_layer)` so depth does not blow up activation variance at step zero.
-
-**Shape:** 12 layers, 12 heads, **d_model 384**, context **128**.
-
-### Title-boundary attention mask
-
-Training text is `title₁ <eos> title₂ <eos> …`. Pure causal masking still lets tokens in one headline attend to another headline in the same window. I mask to **causal ∧ same segment**, where segment boundaries come from `<eos>` positions. This matches the generative structure of the data. Tokenization, batching, and `evaluate()` are unchanged; only allowed attention pairs in `forward` differ.
-
-### Tokenization and optimization
-
-- Byte-level **BPE**, vocabulary **16 000**, specials `<pad>`, `<eos>`, `<unk>`.
-- Corpus pretokenized once to flat tensors (`data.py`) for simple batching.
-- **AdamW** with weight decay on **2D** parameters only; **OneCycleLR** with max lr **5×10⁻⁴**.
-- **Batch 64**, **dropout 0.1**, **gradient accumulation 1** → **938 optimizer steps** over seven epochs (134 micro-batches per epoch).
-
-Development was done on Apple Silicon (MPS); submission path remains `task train` in the Dev Container per README.
+| Phase | ~Wall clock |
+|-------|-------------|
+| v1 + failed v2 + experiment + QK + kitchen sink | **~2–3 h** train |
+| Setup (venv, dataset) | extra |
 
 ---
 
-## What we tried and rejected
+## Submission stack (when not beating 1.233613)
 
-| Attempt | Outcome | Lesson |
-|---------|---------|--------|
-| **Grad accum = 2**, dropout 0 | Val **~1.28** vs v1 **1.234** | Fixed 7 epochs ⇒ accum halves **optimizer steps** (469 vs 938); OneCycle was tuned for 938—schedule and update count must move together. |
-| **Larger “sweep-style” stack** (256 ctx, unigram, ~46M params, Muon, R-Drop, many extras) | Val **~1.45** after full 7 epochs | More machinery and public “winning” recipes did **not** beat the simpler v1 recipe on this metric and budget. |
-| **Optional v3-style QK norm** on v1 shape | Off by default (`qk_norm=False`) | Implemented in `model.py` for a cheap ablation; **submit config matches the 1.234 log** without it. |
+**Model:** RMSNorm, RoPE, SwiGLU, SDP attention, NeoX parallel block, tied embeddings, residual init scaling, **QK norm**, **title-boundary mask** (no cross-`<eos>` attention).
 
-Public GitHub forks mostly commit only **baseline.log (~1.753)**. Published sub-1.2 numbers elsewhere rely on large sweep campaigns, not a single default `train.py` run.
+**Train:** BPE 16k, AdamW, OneCycle max lr 5e-4, 128×64, accum 1 → **938** steps.
 
 ---
 
-## Repository map
+## All runs (including failures)
 
-| File | Role |
-|------|------|
-| `train.py` | Entry point; hyperparameters; training loop; frozen `evaluate()` |
-| `model.py` | GPT, blocks, RoPE, title mask |
-| `rope.py` | Rotary embeddings |
-| `data.py` | Dataset load, BPE training, batches |
-| `utils.py` | Devcontainer guard; `MAINRUN_LOCAL` for local runs |
+| Run | What changed | Best val | Why it failed / note |
+|-----|----------------|----------|----------------------|
+| **v1** | Modern block + mask + BPE | 1.234482 | Good; superseded by QK |
+| **v2** | grad accum **2**, dropout 0 | **~1.284** | **Fail:** 469 optimizer steps not 938; OneCycle mismatch |
+| **Experiment** | 256 ctx, unigram, ~46M, MetalMuon, WSD, R-Drop, gates, value-residual, … | **~1.448** | **Fail:** heavier than v1, worse CE under same 7 epochs |
+| **QK norm** | v1 + QK norm, dropout 0.1 | **1.233613** | **Best — use if last run doesn’t beat it** |
+| **Kitchen sink** | dropout **0**, title CE boost 1.2×, rope 50k, lr 5.5e-4, z-loss | **1.248** (final) | **Fail:** val improved to ~1.245 mid-run then **overfit**; train tricks ≠ better eval |
+| **Last safe** | QK + **dropout 0.05** only | *pending* | One ~15 min run; if ≥ 1.2336, submit QK log |
 
-Refactor is intentional; behavior is still `python train.py` / `task train`.
+**Not run / skipped:** accum without step retune (learned from v2), inauguration/In stack (different project), changing `evaluate()`.
+
+**Forks (GitHub):** Most commit baseline ~1.753; one fork documents sweeps ~1.14 with week-long search—not matched here.
 
 ---
 
-## Reproducibility
+## Justifications
+
+- **Title mask:** Titles are separate segments; cross-title attention is wrong inductive bias.
+- **Modern block:** Standard small-LM upgrade vs baseline.
+- **QK norm:** Measured small gain over v1.
+- **Failed kitchen sink:** Train-only objectives and zero dropout did not improve **graded** CE.
+- **Failed experiment:** Parameter count and optimizer complexity ≠ better under fixed epoch budget.
+
+---
+
+## Last run (you)
 
 ```bash
-git checkout submit-v1
-cd mainrun
-export MAINRUN_LOCAL=1   # local only
+cd ~/projects/mainrun/mainrun
+source .venv/bin/activate
+export MAINRUN_LOCAL=1 HF_HUB_ENABLE_HF_TRANSFER=1
 python train.py
+cp logs/mainrun.log logs/run_v1_do005.log
 ```
 
-Optional ablation on same branch: set `qk_norm=True` and/or `dropout=0.05` in `Hyperparameters`, re-run, compare `validation_step` to **1.234** before changing the submission log.
+Compare best `validation_step` to **1.233613**. Lower → submit that log + set `dropout=0.05` in `train.py`. Not lower → submit **`run_v1_qknorm.log`**, set `dropout=0.1` in `train.py` for a clean story.
+
+**Expect:** ~1.232–1.235 or same; big jumps unlikely.
 
 ---
 
-## Conclusion
+## Repo
 
-Run v1 combines a **standard modern LM block** with one **dataset-specific** idea (title-boundary masking) and a **schedule matched to the step budget**. It delivers a large, reproducible gain over baseline without touching the evaluation function. Heavier configurations inspired by public sweeps were tried and did not improve the graded loss under the same rules.
-
-Export this document to **`report.pdf`** in this folder before `task submit`.
+Branch **`submit-v1`**. Export **`report.pdf`** before `task submit`.
