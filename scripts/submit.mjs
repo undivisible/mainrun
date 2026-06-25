@@ -61,7 +61,7 @@ try {
   if (existsSync(zipPath)) await fs.unlink(zipPath);
 
   run(
-    `zip -r submission.zip . -x "node_modules/*" -x "mainrun/data/*" -x "mainrun/.venv/*" -x ".git/*" -x "*.zip" -x "*/__pycache__/*" -x "*.DS_Store" -x "mainrun/logs/mainrun.log"`
+    `zip -r submission.zip . -x "node_modules/*" -x "mainrun/data/*" -x "mainrun/.venv/*" -x ".git/*" -x "*.zip" -x "*/__pycache__/*" -x "*.DS_Store"`
   );
 
   console.log("Requesting upload URL...");
