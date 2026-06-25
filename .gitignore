@@ -1,4 +1,6 @@
 mainrun/data/
+.fork-survey/
+mainrun/.venv/
 
 __pycache__/
 *.py[cod]

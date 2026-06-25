@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 def _check_devcontainer():
+    if os.environ.get("MAINRUN_LOCAL") == "1":
+        return
     if not all([
         Path("/root/.mainrun").exists()
     ]):
