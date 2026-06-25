@@ -1,0 +1,6 @@
+# Local Mac training (Python 3.11–3.14). Devcontainer still uses requirements.txt (torch 2.7.1 on Py 3.10).
+datasets>=4.0.0,<5
+structlog>=24.4.0
+tokenizers>=0.21.0,<0.22
+torch>=2.9.0
+tqdm>=4.67.0

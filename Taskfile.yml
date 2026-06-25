@@ -14,8 +14,15 @@ tasks:
   train:
     deps: [checkpoint, download]
     dir: mainrun
+    env:
+      MAINRUN_LOCAL: '{{.MAINRUN_LOCAL | default ""}}'
     cmds:
       - python3 train.py
+
+  train-burn:
+    dir: burn
+    cmds:
+      - echo "Burn trainer WIP — see burn/README.md"
 
   submit:
     deps: [checkpoint]
