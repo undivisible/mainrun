@@ -1,8 +1,21 @@
+import { $ } from "bun";
+import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
+import readline from "node:readline/promises";
+import { stdin, stdout } from "node:process";
+
+const question = async (prompt) => {
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const answer = await rl.question(prompt);
+  rl.close();
+  return answer;
+};
+
 try {
   let email
   const envPath = '../.env'
   
-  if (await fs.pathExists(envPath)) {
+  if (existsSync(envPath)) {
     const envContent = await fs.readFile(envPath, 'utf-8')
     const match = envContent.match(/EMAIL=(.+)/)
     if (match) {
