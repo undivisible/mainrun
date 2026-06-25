@@ -162,22 +162,3 @@ class GPT(nn.Module):
             else:
                 adamw_params.append(p)
         return muon_params, adamw_params
-
-    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple[float, float], device_type: str):
-        decay_params, nodecay_params = [], []
-        for _n, p in self.named_parameters():
-            if not p.requires_grad:
-                continue
-            if p.dim() >= 2:
-                decay_params.append(p)
-            else:
-                nodecay_params.append(p)
-        groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-        import inspect
-
-        use_fused = device_type == "cuda" and "fused" in inspect.signature(torch.optim.AdamW).parameters
-        extra = {"fused": True} if use_fused else {}
-        return torch.optim.AdamW(groups, lr=learning_rate, betas=betas, **extra)

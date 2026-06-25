@@ -7,7 +7,7 @@ from tokenizers import Regex
 
 def get_titles(num_titles: int, seed: int, val_frac: float):
     ds = load_dataset("julien040/hacker-news-posts", split="train", cache_dir="./data").shuffle(seed=seed)
-    titles = [row["title"].strip().lower() for row in ds.take(num_titles)]
+    titles = [row["title"].strip() for row in ds.take(num_titles)]
     n = int(num_titles * (1 - val_frac))
     return titles[:n], titles[n:]
 
