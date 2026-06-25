@@ -25,13 +25,13 @@ class Hyperparameters:
     n_layer: int = 12
     n_head: int = 12
     d_model: int = 384
-    dropout: float = 0.0
+    dropout: float = 0.1
     lr: float = 5e-4
     weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
     evals_per_epoch: int = 3
-    gradient_accumulation_steps: int = 2
+    gradient_accumulation_steps: int = 1
     epochs: int = 7
     seed: int = 1337
     num_titles: int = 100_000
