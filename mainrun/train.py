@@ -8,6 +8,7 @@ from pathlib import Path
 import structlog
 import torch
 from torch.nn import functional as F
+from torch.optim._muon import Muon
 from tqdm import tqdm
 
 import utils
@@ -25,7 +26,7 @@ class Hyperparameters:
     n_layer: int = 12
     n_head: int = 12
     d_model: int = 384
-    dropout: float = 0.05
+    dropout: float = 0.1
     qk_norm: bool = True
     weight_decay: float = 0.1
     beta1: float = 0.9
@@ -37,10 +38,61 @@ class Hyperparameters:
     num_titles: int = 100_000
     val_frac: float = 0.10
     log_file: str = "./logs/mainrun.log"
-    run_tag: str = "v1_qknorm_dropout0.05"
-    onecycle_pct_start: float = 0.1
-    onecycle_div_factor: float = 25.0
-    onecycle_final_div_factor: float = 1000.0
+    run_tag: str = "v3_muon_wsd_ema"
+    muon_lr: float = 0.02
+    adamw_lr: float = 5e-4
+    muon_momentum: float = 0.95
+    wsd_warmup_pct: float = 0.05
+    wsd_decay_pct: float = 0.20
+    rope_theta: float = 500.0
+    label_smoothing: float = 0.0
+    use_ema: bool = True
+    ema_target_decay: float = 0.999
+
+
+class ModelEMA:
+    def __init__(self, model: torch.nn.Module, target_decay: float = 0.999):
+        self.target = target_decay
+        self.shadow = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+        self.backup = None
+
+    @staticmethod
+    def _decay(step: int, target: float) -> float:
+        return min(target, (1 + step) / (10 + step))
+
+    def update(self, model: torch.nn.Module, step: int):
+        d = self._decay(step, self.target)
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[n].mul_(d).add_(p.data, alpha=1 - d)
+
+    def swap_in(self, model: torch.nn.Module):
+        self.backup = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                p.data.copy_(self.shadow[n])
+
+    def swap_out(self, model: torch.nn.Module):
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                p.data.copy_(self.backup[n])
+        self.backup = None
+
+
+def make_wsd_lambda(max_steps: int, warmup_pct: float = 0.05, decay_pct: float = 0.20):
+    warmup_steps = max(1, int(max_steps * warmup_pct))
+    decay_start = max_steps - max(1, int(max_steps * decay_pct))
+    decay_len = max(1, max_steps - decay_start)
+
+    def lam(step: int) -> float:
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        elif step < decay_start:
+            return 1.0
+        else:
+            return max(0.0, 1.0 - (step - decay_start + 1) / decay_len)
+
+    return lam
 
 
 def configure_logging(log_file: str):
@@ -136,19 +188,36 @@ def main():
         eos_id=tok.eos_id,
         qk_norm=args.qk_norm,
         rope_theta=args.rope_theta,
+        label_smoothing=args.label_smoothing,
     )
     model = GPT(cfg).to(device)
     logger.log("model_info", parameters_count=sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-    opt = model.configure_optimizers(args.weight_decay, args.lr, (args.beta1, args.beta2), str(device))
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        opt,
-        max_lr=args.lr,
-        total_steps=max_steps,
-        pct_start=args.onecycle_pct_start,
-        div_factor=args.onecycle_div_factor,
-        final_div_factor=args.onecycle_final_div_factor,
+    muon_params, adamw_params = model.get_optimizer_param_groups()
+    muon_opt = Muon(
+        muon_params,
+        lr=args.muon_lr,
+        weight_decay=args.weight_decay,
+        momentum=args.muon_momentum,
     )
+    adamw_opt = torch.optim.AdamW(
+        adamw_params,
+        lr=args.adamw_lr,
+        weight_decay=args.weight_decay,
+        betas=(args.beta1, args.beta2),
+    )
+    wsd_lam = make_wsd_lambda(max_steps, args.wsd_warmup_pct, args.wsd_decay_pct)
+    muon_sched = torch.optim.lr_scheduler.LambdaLR(muon_opt, wsd_lam)
+    adamw_sched = torch.optim.lr_scheduler.LambdaLR(adamw_opt, wsd_lam)
+    logger.log(
+        "optimizer_info",
+        muon_params=len(muon_params),
+        adamw_params=len(adamw_params),
+        muon_lr=args.muon_lr,
+        adamw_lr=args.adamw_lr,
+    )
+
+    ema = ModelEMA(model, target_decay=args.ema_target_decay) if args.use_ema else None
 
     def evaluate():
         model.eval()
@@ -166,7 +235,7 @@ def main():
     step = 0
     t0 = time.time()
     model.train()
-    opt.zero_grad(set_to_none=True)
+    model.zero_grad(set_to_none=True)
 
     for epoch in range(1, args.epochs + 1):
         running_loss = 0.0
@@ -182,29 +251,39 @@ def main():
 
             if micro_in_group == args.gradient_accumulation_steps or i == batches:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step()
-                scheduler.step()
-                opt.zero_grad(set_to_none=True)
+                muon_opt.step()
+                adamw_opt.step()
+                muon_sched.step()
+                adamw_sched.step()
+                model.zero_grad(set_to_none=True)
                 step += 1
+                if ema is not None:
+                    ema.update(model, step)
                 elapsed = time.time() - t0
                 logger.log(
                     "training_step",
                     step=step,
                     max_steps=max_steps,
                     loss=running_loss / micro_in_group,
-                    lr=opt.param_groups[0]["lr"],
+                    lr=muon_opt.param_groups[0]["lr"],
+                    adamw_lr=adamw_opt.param_groups[0]["lr"],
                     elapsed_time=elapsed,
                     prnt=False,
                 )
                 running_loss = 0.0
                 micro_in_group = 0
                 if step == 1 or step % eval_interval == 0 or step == max_steps:
+                    if ema is not None:
+                        ema.swap_in(model)
                     val_loss = evaluate()
+                    if ema is not None:
+                        ema.swap_out(model)
                     logger.log(
                         "validation_step",
                         step=step,
                         max_steps=max_steps,
                         loss=val_loss,
+                        ema=args.use_ema,
                         elapsed_time=elapsed,
                     )
 
