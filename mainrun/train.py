@@ -20,14 +20,14 @@ logger = None
 
 @dataclass
 class Hyperparameters:
-    block_size: int = 128
+    block_size: int = 256
     batch_size: int = 64
     train_batch_size: int = 32
-    vocab_size: int = 16_000
-    n_layer: int = 12
-    n_head: int = 12
-    d_model: int = 384
-    dropout: float = 0.05
+    vocab_size: int = 24_000
+    n_layer: int = 8
+    n_head: int = 9
+    d_model: int = 576
+    dropout: float = 0.0
     qk_norm: bool = True
     weight_decay: float = 0.1
     beta1: float = 0.9
@@ -39,16 +39,17 @@ class Hyperparameters:
     num_titles: int = 100_000
     val_frac: float = 0.10
     log_file: str = "./logs/mainrun.log"
-    run_tag: str = "v5_bs32_dropout05_evalfix"
+    run_tag: str = "v7_jeremy_stack"
     muon_lr: float = 0.02
     adamw_lr: float = 5e-4
     muon_momentum: float = 0.95
     wsd_warmup_pct: float = 0.05
     wsd_decay_pct: float = 0.20
-    rope_theta: float = 500.0
+    rope_theta: float = 1000.0
     label_smoothing: float = 0.0
     use_ema: bool = True
     ema_target_decay: float = 0.999
+    domain_tokens: bool = True
 
 
 class ModelEMA:
@@ -160,7 +161,7 @@ def main():
     train_titles, val_titles = get_titles(args.num_titles, args.seed, args.val_frac)
     eos_token = "<eos>"
     tok = BPETokenizer(
-        train_tokenizer(train_titles + val_titles, args.vocab_size, eos_token=eos_token),
+        train_tokenizer(train_titles + val_titles, args.vocab_size, eos_token=eos_token, domain_tokens=args.domain_tokens),
         eos_token=eos_token,
     )
     train_ids, val_ids, _train_text, val_text = pretokenize_corpus(tok, train_titles, val_titles, eos_token)
