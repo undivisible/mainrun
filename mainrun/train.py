@@ -87,33 +87,6 @@ def configure_logging(log_file: str):
     return DualLogger(file_handler)
 
 
-def _segment_start_weights(idx: torch.Tensor, eos_id: int, boost: float):
-    if boost <= 1.0:
-        return None
-    B, T = idx.shape
-    eos = idx == eos_id
-    prev_eos = torch.zeros_like(eos)
-    prev_eos[:, 1:] = eos[:, :-1]
-    start = prev_eos | (torch.arange(T, device=idx.device) == 0).view(1, T)
-    w = torch.ones(B, T, device=idx.device, dtype=torch.float32)
-    return torch.where(start, w * boost, w)
-
-
-def _train_ce(model, xb, yb, boost: float, z_coef: float):
-    logits, _ = model(xb, None)
-    B, T, V = logits.shape
-    ce = F.cross_entropy(logits.view(-1, V), yb.view(-1), reduction="none").view(B, T)
-    w = _segment_start_weights(xb, model.cfg.eos_id, boost)
-    if w is None:
-        loss = ce.mean()
-    else:
-        loss = (ce * w).sum() / w.sum()
-    if z_coef > 0:
-        z = torch.logsumexp(logits.float(), dim=-1)
-        loss = loss + z_coef * (z * z).mean()
-    return loss
-
-
 def main():
     args = Hyperparameters()
     torch.manual_seed(args.seed)
