@@ -21,12 +21,12 @@ logger = None
 @dataclass
 class Hyperparameters:
     block_size: int = 128
-    batch_size: int = 64
+    batch_size: int = 32
     vocab_size: int = 16_000
     n_layer: int = 12
     n_head: int = 12
     d_model: int = 384
-    dropout: float = 0.1
+    dropout: float = 0.05
     qk_norm: bool = True
     weight_decay: float = 0.1
     beta1: float = 0.9
@@ -38,7 +38,7 @@ class Hyperparameters:
     num_titles: int = 100_000
     val_frac: float = 0.10
     log_file: str = "./logs/mainrun.log"
-    run_tag: str = "v3_muon_wsd_ema"
+    run_tag: str = "v4_bs32_dropout05"
     muon_lr: float = 0.02
     adamw_lr: float = 5e-4
     muon_momentum: float = 0.95
