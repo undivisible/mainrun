@@ -1,8 +1,6 @@
 import torch
 from datasets import load_dataset
-from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers, trainers
-from tokenizers.normalizers import Lowercase, NFKC, Replace, Sequence, Strip
-from tokenizers import Regex
+from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, trainers
 
 
 def get_titles(num_titles: int, seed: int, val_frac: float):
@@ -41,10 +39,10 @@ def train_tokenizer(
 ) -> Tokenizer:
     tokenizer = Tokenizer(models.BPE(unk_token=unk_token))
     tokenizer.normalizer = normalizers.Sequence([
-        NFKC(),
-        Lowercase(),
-        Replace(Regex(r"\s+"), " "),
-        Strip(),
+        normalizers.NFKC(),
+        normalizers.Lowercase(),
+        normalizers.Replace(Regex(r"\s+"), " "),
+        normalizers.Strip(),
     ])
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
     tokenizer.decoder = decoders.ByteLevel()
