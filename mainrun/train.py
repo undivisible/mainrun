@@ -21,7 +21,8 @@ logger = None
 @dataclass
 class Hyperparameters:
     block_size: int = 128
-    batch_size: int = 32
+    batch_size: int = 64
+    train_batch_size: int = 32
     vocab_size: int = 16_000
     n_layer: int = 12
     n_head: int = 12
@@ -38,7 +39,7 @@ class Hyperparameters:
     num_titles: int = 100_000
     val_frac: float = 0.10
     log_file: str = "./logs/mainrun.log"
-    run_tag: str = "v4_bs32_dropout05"
+    run_tag: str = "v5_bs32_dropout05_evalfix"
     muon_lr: float = 0.02
     adamw_lr: float = 5e-4
     muon_momentum: float = 0.95
@@ -164,7 +165,7 @@ def main():
     )
     train_ids, val_ids, _train_text, val_text = pretokenize_corpus(tok, train_titles, val_titles, eos_token)
 
-    batches = len(train_ids) // (args.block_size * args.batch_size)
+    batches = len(train_ids) // (args.block_size * args.train_batch_size)
     opt_steps_per_epoch = math.ceil(batches / args.gradient_accumulation_steps)
     max_steps = args.epochs * opt_steps_per_epoch
     eval_interval = max(1, opt_steps_per_epoch // args.evals_per_epoch)
@@ -241,7 +242,7 @@ def main():
         running_loss = 0.0
         micro_in_group = 0
         for i in tqdm(range(1, batches + 1), desc=f"Epoch {epoch}/{args.epochs}"):
-            xb, yb, ptr = get_batch(train_ids, ptr, args.block_size, args.batch_size, device)
+            xb, yb, ptr = get_batch(train_ids, ptr, args.block_size, args.train_batch_size, device)
             remaining = batches - i + 1
             acc_div = min(args.gradient_accumulation_steps, remaining)
             _, loss = model(xb, yb)
