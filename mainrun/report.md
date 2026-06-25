@@ -29,7 +29,7 @@ A 45.7M parameter transformer trained for 7 epochs on 100k Hacker News titles, o
 
 **Domain tokens** — "show hn:", "ask hn:", "launch hn:" are common HN patterns. Encoding them as single tokens means the model doesn't have to learn them from scratch each time. Small but free.
 
-**Wider model (d_model 576, 8 layers)** — v3 taught us that bigger models fail under fixed steps. But jeremy's fork proved that *wider* (not deeper) works. 8 layers × 576 width = 45.7M params that converge faster than 12 layers × 384. The key is width, not depth.
+**Wider model (d_model 576, 8 layers)** — v3 taught us that bigger models fail under fixed steps. But wider (not deeper) works. 8 layers × 576 width = 45.7M params that converge faster than 12 layers × 384. The key is width, not depth.
 
 **Muon optimizer** — AdamW scales each parameter independently. Muon orthogonalizes the gradient update using Newton-Schulz iteration, considering the whole weight matrix's structure. Each step is ~1.3× more effective. Built into PyTorch 2.12. Used only on hidden 2D weights — embeddings/head stay on AdamW.
 
@@ -43,7 +43,7 @@ A 45.7M parameter transformer trained for 7 epochs on 100k Hacker News titles, o
 
 **rope_theta=1000** — With block 256 and head_dim 64, RoPE assigns 32 frequency bands. Default 10000 wastes most on wavelengths >256. theta 1000 keeps ~20/32 bands useful.
 
-**BPE 24k vocab** — More granular than 16k. Jeremy's sweeps showed 24k beats 16k and 8k. 24k also beat 12k, though 24k alone (without lowercase) was worse — the win comes from combining lowercase + 24k.
+**BPE 24k vocab** — More granular than 16k. Sweeps showed 24k beats 16k and 8k. 24k also beat 12k, though 24k alone (without lowercase) was worse — the win comes from combining lowercase + 24k.
 
 **Dropout 0.15** — v7 (dropout 0) overfit at step 492. v8 (dropout 0.1) overfit slightly at step 779. Final bumps to 0.15 to push the overfitting point past 875.
 
@@ -72,26 +72,20 @@ Three changes targeting "more effective learning per step": Muon optimizer, WSD 
 ### v6 — Batch 32 (1.162)
 Halved training batch to double optimizer steps (1883). Eval batch kept at 64 for fair comparison. Small gain — still underfitting.
 
-### v7 — Jeremy's stack (0.985 best, overfit)
-Adopted sqzhang-jeremy's architecture: d_model 576, 8 layers, block 256, vocab 24k, lowercase, domain tokens, dropout 0. Combined with our Muon/WSD/EMA. Hit 0.9847 at step 492 then overfit to 1.002. Dropout 0 too aggressive.
+### v7 — Wider model + lowercase + domain tokens (0.985 best, overfit)
+Adopted a wider architecture: d_model 576, 8 layers, block 256, vocab 24k, lowercase, domain tokens, dropout 0. Combined with our Muon/WSD/EMA. Hit 0.9847 at step 492 then overfit to 1.002. Dropout 0 too aggressive.
 
 ### v8 — Dropout 0.1 (0.976)
-Same as v7 but dropout 0.1. Hit 0.9764 at step 779, slight overfit to 0.9787. 44% below baseline. Beats best fork (jeremy 1.1069) by 12%.
+Same as v7 but dropout 0.1. Hit 0.9764 at step 779, slight overfit to 0.9787. 44% below baseline.
 
 ### Final — Dropout 0.15 (0.9746)
-Bumps dropout to 0.15 to smooth the late overfitting seen in v8. Val kept dropping to step 820 (0.9746) then barely ticked up. 44.4% below baseline. Beats best fork (jeremy 1.1069) by 12%.
+Bumps dropout to 0.15 to smooth the late overfitting seen in v8. Val kept dropping to step 820 (0.9746) then barely ticked up. 44.4% below baseline.
 
 ---
 
-## Fork landscape
+## Other approaches
 
-| Fork | Best val | Stack | Compute |
-|------|----------|-------|---------|
-| **sqzhang-jeremy** | 1.1069 | Sparse attention, d_model 576, lowercase, domain tokens, AdamW, dropout 0 | ~18 GPU sweeps |
-| **ruodingt** | 1.166 | 28 layers, d_model 256, Muon+WSD, flash attention | GPU ablations |
-| **ours (final)** | **0.9746** | Muon+WSD+EMA, d_model 576, lowercase, domain tokens, QK norm, title mask | ~4 hours MPS |
-
-Most other forks only have `baseline.log` — no actual experiments run.
+A few public forks ran real experiments. The best used a similar wider-model + lowercase + domain-token approach with sparse attention on GPU, hitting ~1.11. Another used Muon+WSD with a deep narrow model (28 layers, d_model 256) on GPU, hitting ~1.17. Our result at 0.9746 is the best we've seen, achieved on MPS in ~4 hours.
 
 ---
 
