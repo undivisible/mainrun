@@ -20,6 +20,7 @@ class GPTConfig:
     rope_theta: float = 10000.0
     rms_eps: float = 1e-5
     swiglu_mult: float = 8 / 3
+    qk_norm: bool = False
 
 
 def title_boundary_attn_mask(idx: torch.Tensor, eos_id: int) -> torch.Tensor:
@@ -57,6 +58,8 @@ class CausalSelfAttention(nn.Module):
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop = nn.Dropout(cfg.dropout)
         self.rotary = RotaryEmbedding(self.head_dim, base=cfg.rope_theta)
+        self.q_norm = RMSNorm(self.head_dim, eps=cfg.rms_eps) if cfg.qk_norm else None
+        self.k_norm = RMSNorm(self.head_dim, eps=cfg.rms_eps) if cfg.qk_norm else None
 
     def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
@@ -67,6 +70,9 @@ class CausalSelfAttention(nn.Module):
         sin = sin[None, None, :, :]
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         y = F.scaled_dot_product_attention(
             q,
             k,
