@@ -1,11 +1,13 @@
 import torch
 from datasets import load_dataset
-from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers, trainers
+from tokenizers.normalizers import Lowercase, NFKC, Replace, Sequence, Strip
+from tokenizers import Regex
 
 
 def get_titles(num_titles: int, seed: int, val_frac: float):
     ds = load_dataset("julien040/hacker-news-posts", split="train", cache_dir="./data").shuffle(seed=seed)
-    titles = [row["title"].strip() for row in ds.take(num_titles)]
+    titles = [row["title"].strip().lower() for row in ds.take(num_titles)]
     n = int(num_titles * (1 - val_frac))
     return titles[:n], titles[n:]
 
@@ -35,13 +37,23 @@ def train_tokenizer(
     unk_token: str = "<unk>",
     pad_token: str = "<pad>",
     eos_token: str = "<eos>",
+    domain_tokens: bool = False,
 ) -> Tokenizer:
     tokenizer = Tokenizer(models.BPE(unk_token=unk_token))
+    tokenizer.normalizer = normalizers.Sequence([
+        NFKC(),
+        Lowercase(),
+        Replace(Regex(r"\s+"), " "),
+        Strip(),
+    ])
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
     tokenizer.decoder = decoders.ByteLevel()
+    special_tokens = [pad_token, eos_token, unk_token]
+    if domain_tokens:
+        special_tokens.extend(["show hn:", "ask hn:", "launch hn:"])
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
-        special_tokens=[pad_token, eos_token, unk_token],
+        special_tokens=special_tokens,
         show_progress=False,
     )
     tokenizer.train_from_iterator(titles, trainer)
