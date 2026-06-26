@@ -5,6 +5,7 @@ use crate::{
     utils::{LrScheduler, ProgressBar},
     bpe_data::{BpeDataLoader, BpeTokenizer},
     ema::ModelEma,
+    muon::{MuonOptimizer, split_param_groups},
 };
 use candle_core::{Device, Result, Tensor, IndexOp};
 use candle_nn::{Optimizer, AdamW, ParamsAdamW, VarMap};
@@ -23,6 +24,8 @@ pub struct RealTrainingConfig {
     pub eps: f64,
     pub use_ema: bool,
     pub ema_target_decay: f64,
+    pub use_muon: bool,
+    pub muon_momentum: f64,
 }
 
 #[derive(Debug)]
@@ -41,7 +44,8 @@ pub struct RealTrainer {
     varmap: VarMap,
     data_loader: BpeDataLoader,
     tokenizer: BpeTokenizer,
-    optimizer: AdamW,
+    optimizer: Option<AdamW>,
+    muon_optimizer: Option<MuonOptimizer>,
     ema: Option<ModelEma>,
 }
 
@@ -53,22 +57,43 @@ impl RealTrainer {
     ) -> Result<Self> {
         let (model, varmap) = create_gpt_model(config.model_config.clone(), &config.device)?;
 
-        let optimizer_params = ParamsAdamW {
-            lr: config.learning_rate,
-            weight_decay: config.weight_decay,
-            beta1: config.beta1,
-            beta2: config.beta2,
-            eps: config.eps,
-        };
-
         let vars: Vec<(String, candle_core::Var)> = {
             let data = varmap.data().lock().unwrap();
             data.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         println!("Number of trainable variables: {}", vars.len());
 
-        let opt_vars: Vec<candle_core::Var> = vars.iter().map(|(_, v)| v.clone()).collect();
-        let optimizer = AdamW::new(opt_vars, optimizer_params)?;
+        let (optimizer, muon_optimizer) = if config.use_muon {
+            // Split into Muon (2D non-embedding) and AdamW (1D + embeddings) groups
+            let (muon_vars, adamw_vars) = split_param_groups(&vars);
+            println!("Muon params: {}, AdamW params: {}", muon_vars.len(), adamw_vars.len());
+
+            let muon_opt = MuonOptimizer::new(
+                muon_vars,
+                adamw_vars,
+                config.learning_rate,
+                config.muon_momentum,
+                config.weight_decay,
+                config.learning_rate / 40.0, // adamw_lr = muon_lr / 40
+                config.beta1,
+                config.beta2,
+                config.eps,
+                &config.device,
+            )?;
+
+            (None, Some(muon_opt))
+        } else {
+            let optimizer_params = ParamsAdamW {
+                lr: config.learning_rate,
+                weight_decay: config.weight_decay,
+                beta1: config.beta1,
+                beta2: config.beta2,
+                eps: config.eps,
+            };
+            let opt_vars: Vec<candle_core::Var> = vars.iter().map(|(_, v)| v.clone()).collect();
+            let optimizer = AdamW::new(opt_vars, optimizer_params)?;
+            (Some(optimizer), None)
+        };
 
         let ema = if config.use_ema {
             Some(ModelEma::new(&vars, config.ema_target_decay, &config.device)?)
@@ -83,6 +108,7 @@ impl RealTrainer {
             data_loader,
             tokenizer,
             optimizer,
+            muon_optimizer,
             ema,
         })
     }
@@ -100,7 +126,13 @@ impl RealTrainer {
 
         for step in 0..self.config.max_steps {
             let lr = self.config.lr_scheduler.get_lr(step) as f64;
-            self.optimizer.set_learning_rate(lr);
+
+            if let Some(opt) = &mut self.optimizer {
+                opt.set_learning_rate(lr);
+            }
+            if let Some(opt) = &mut self.muon_optimizer {
+                opt.set_learning_rate(lr);
+            }
 
             // Training step
             let train_loss = self.training_step()?;
@@ -176,7 +208,13 @@ impl RealTrainer {
         let (input, targets) = self.data_loader.get_train_batch()?;
         let logits = self.model.forward(&input)?;
         let loss = self.cross_entropy_loss(&logits, &targets)?;
-        self.optimizer.backward_step(&loss)?;
+
+        if let Some(opt) = &mut self.muon_optimizer {
+            opt.backward_step(&loss)?;
+        } else if let Some(opt) = &mut self.optimizer {
+            opt.backward_step(&loss)?;
+        }
+
         Ok(loss.to_vec0::<f32>()? as f64)
     }
 

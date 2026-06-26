@@ -163,9 +163,11 @@ pub async fn load_bpe_data(
     println!("Loading pre-tokenized BPE data...");
     
     // Find the tokenized data file
-    let data_path = find_data_file("tokenized_data.json")
+    let data_path = find_data_file("tokenized_data_24k.json")
+        .or_else(|| find_data_file("tokenized_data.json"))
         .ok_or_else(|| anyhow::anyhow!("Cannot find tokenized_data.json"))?;
-    let tokenizer_path = find_data_file("tokenizer.json")
+    let tokenizer_path = find_data_file("tokenizer_24k.json")
+        .or_else(|| find_data_file("tokenizer.json"))
         .ok_or_else(|| anyhow::anyhow!("Cannot find tokenizer.json"))?;
     
     // Load tokenizer

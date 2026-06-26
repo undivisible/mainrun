@@ -24,17 +24,17 @@ pub struct GPTConfig {
 impl Default for GPTConfig {
     fn default() -> Self {
         Self {
-            vocab_size: 24576,
+            vocab_size: 24000,
             block_size: 256,
             n_layer: 8,
             n_head: 9,
             d_model: 576,
             dropout: 0.15,
-            eos_id: 0,
-            rope_theta: 10000.0,
+            eos_id: 1,
+            rope_theta: 1000.0,
             rms_eps: 1e-5,
             swiglu_mult: 8.0 / 3.0,
-            qk_norm: false,
+            qk_norm: true,
             label_smoothing: 0.0,
         }
     }

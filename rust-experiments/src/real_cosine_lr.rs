@@ -102,6 +102,8 @@ impl RealCosineLRExperiment {
             eps: self.config.eps,
             use_ema: self.config.use_ema,
             ema_target_decay: self.config.ema_target_decay,
+            use_muon: true,
+            muon_momentum: 0.95,
         };
 
         let mut trainer = RealTrainer::new(training_config, data_loader, tokenizer)?;

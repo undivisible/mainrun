@@ -31,6 +31,8 @@ pub struct ExperimentConfig {
     pub lr_scheduler: LrScheduleType,
     pub adaptive_dropout: Option<(f32, f32, usize)>, // (initial, final, ramp_steps)
     pub token_augment: Option<f32>, // token dropout prob
+    pub use_muon: bool,
+    pub muon_momentum: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +61,8 @@ impl Default for ExperimentConfig {
             lr_scheduler: LrScheduleType::Wsd { warmup_pct: 0.05, decay_pct: 0.20 },
             adaptive_dropout: None,
             token_augment: None,
+            use_muon: false,
+            muon_momentum: 0.95,
         }
     }
 }
@@ -110,6 +114,7 @@ pub fn run_experiment(
     // Build model config with correct vocab
     let mut model_config = exp_config.model_config.clone();
     model_config.vocab_size = tokenizer.vocab_size();
+    model_config.eos_id = tokenizer.eos_id() as usize;
 
     // Build training config
     let training_config = RealTrainingConfig {
@@ -129,6 +134,8 @@ pub fn run_experiment(
         eps: 1e-8,
         use_ema: exp_config.use_ema,
         ema_target_decay: exp_config.ema_decay,
+        use_muon: exp_config.use_muon,
+        muon_momentum: exp_config.muon_momentum,
     };
 
     println!("Model: {} layers, {} heads, d_model={}", 
@@ -184,10 +191,11 @@ pub fn run_experiment(
 pub fn v9_cosine_lr(device: Device) -> anyhow::Result<ExperimentResult> {
     let config = ExperimentConfig {
         name: "v9_cosine_lr".to_string(),
-        description: "Cosine decay with warmup (0.025 -> 0.001)".to_string(),
+        description: "Cosine decay with warmup, Python-matching model".to_string(),
         model_config: GPTConfig {
-            n_layer: 6, n_head: 6, d_model: 384,
+            n_layer: 8, n_head: 9, d_model: 576,
             qk_norm: true, rope_theta: 1000.0,
+            dropout: 0.15,
             ..Default::default()
         },
         max_lr: 0.025,
@@ -228,14 +236,11 @@ pub fn v11_deeper_model(device: Device) -> anyhow::Result<ExperimentResult> {
 }
 
 pub fn v12_efficient_attention(device: Device) -> anyhow::Result<ExperimentResult> {
-    // Flash attention in Rust/Candle: use the same attention but with memory-efficient
-    // implementation. Candle's SDPA or manual scaled dot product with masking.
-    // For now, this uses the same attention but with qk_norm and lower dropout.
     let config = ExperimentConfig {
         name: "v12_efficient_attention".to_string(),
         description: "Efficient attention with QK norm and lower dropout".to_string(),
         model_config: GPTConfig {
-            n_layer: 6, n_head: 6, d_model: 384,
+            n_layer: 8, n_head: 9, d_model: 576,
             dropout: 0.10, qk_norm: true, rope_theta: 1000.0,
             ..Default::default()
         },
@@ -246,12 +251,11 @@ pub fn v12_efficient_attention(device: Device) -> anyhow::Result<ExperimentResul
 }
 
 pub fn v13_token_augment(device: Device) -> anyhow::Result<ExperimentResult> {
-    // Token-level data augmentation: randomly replace tokens with <unk> during training
     let config = ExperimentConfig {
         name: "v13_token_augment".to_string(),
         description: "Token-level data augmentation (5% token dropout)".to_string(),
         model_config: GPTConfig {
-            n_layer: 6, n_head: 6, d_model: 384,
+            n_layer: 8, n_head: 9, d_model: 576,
             dropout: 0.15, qk_norm: true, rope_theta: 1000.0,
             ..Default::default()
         },
@@ -263,12 +267,11 @@ pub fn v13_token_augment(device: Device) -> anyhow::Result<ExperimentResult> {
 }
 
 pub fn v14_adaptive_dropout(device: Device) -> anyhow::Result<ExperimentResult> {
-    // Adaptive dropout: start at 0.05, increase to 0.2 over 400 steps
     let config = ExperimentConfig {
         name: "v14_adaptive_dropout".to_string(),
         description: "Adaptive dropout: 0.05 -> 0.2 over 400 steps".to_string(),
         model_config: GPTConfig {
-            n_layer: 6, n_head: 6, d_model: 384,
+            n_layer: 8, n_head: 9, d_model: 576,
             dropout: 0.05, qk_norm: true, rope_theta: 1000.0,
             ..Default::default()
         },

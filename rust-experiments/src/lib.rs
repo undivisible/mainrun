@@ -11,6 +11,7 @@ pub mod bpe_data;
 pub mod ema;
 pub mod experiments;
 pub mod inference;
+pub mod muon;
 pub mod real_training;
 pub mod real_cosine_lr;
 
