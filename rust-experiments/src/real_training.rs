@@ -277,7 +277,12 @@ impl RealTrainer {
             total_tokens += b * t;
         }
 
-        Ok(total_ce / total_tokens as f64)
+        // Match Python: divide by val_text character count, not token count.
+        // Python: losses / len(val_text) where val_text includes <eos> separators.
+        let val_text = self.tokenizer.decode_with_special(self.data_loader.val_ids())?;
+        let val_char_count = val_text.chars().count();
+
+        Ok(total_ce / val_char_count as f64)
     }
 
     fn cross_entropy_loss(&self, logits: &Tensor, targets: &Tensor) -> Result<Tensor> {

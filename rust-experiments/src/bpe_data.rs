@@ -31,6 +31,12 @@ impl BpeTokenizer {
         self.tokenizer.decode(ids, true)
             .map_err(|e| candle_core::Error::Msg(format!("Decode error: {}", e)))
     }
+
+    /// Decode with special tokens included (matches Python len(val_text))
+    pub fn decode_with_special(&self, ids: &[u32]) -> Result<String> {
+        self.tokenizer.decode(ids, false)
+            .map_err(|e| candle_core::Error::Msg(format!("Decode error: {}", e)))
+    }
     
     pub fn vocab_size(&self) -> usize {
         self.vocab_size

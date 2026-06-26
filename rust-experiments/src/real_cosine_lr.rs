@@ -36,10 +36,10 @@ impl Default for RealCosineLRConfig {
     fn default() -> Self {
         Self {
             base_config: GPTConfig::default(),
-            max_lr: 0.02,
-            max_steps: 945,
+            max_lr: 0.025,
+            max_steps: 1350,
             eval_interval: 45,
-            learning_rate: 0.02,
+            learning_rate: 0.025,
             weight_decay: 0.1,
             beta1: 0.9,
             beta2: 0.95,
@@ -76,9 +76,10 @@ impl RealCosineLRExperiment {
 
         let mut model_config = self.config.base_config.clone();
         model_config.vocab_size = tokenizer.vocab_size();
-        model_config.n_layer = 6;
-        model_config.n_head = 6;
-        model_config.d_model = 384;
+        // Use Python-matching architecture: 8 layers, 9 heads, d_model=576
+        model_config.n_layer = 8;
+        model_config.n_head = 9;
+        model_config.d_model = 576;
         model_config.block_size = 256;
         model_config.dropout = 0.15;
         model_config.rope_theta = 1000.0;
