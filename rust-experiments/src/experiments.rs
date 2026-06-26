@@ -29,8 +29,6 @@ pub struct ExperimentConfig {
     pub beta1: f64,
     pub beta2: f64,
     pub lr_scheduler: LrScheduleType,
-    pub adaptive_dropout: Option<(f32, f32, usize)>, // (initial, final, ramp_steps)
-    pub token_augment: Option<f32>, // token dropout prob
     pub use_muon: bool,
     pub muon_momentum: f64,
 }
@@ -59,9 +57,7 @@ impl Default for ExperimentConfig {
             beta1: 0.9,
             beta2: 0.95,
             lr_scheduler: LrScheduleType::Wsd { warmup_pct: 0.05, decay_pct: 0.20 },
-            adaptive_dropout: None,
-            token_augment: None,
-            use_muon: false,
+            use_muon: true,
             muon_momentum: 0.95,
         }
     }
@@ -260,7 +256,6 @@ pub fn v13_token_augment(device: Device) -> anyhow::Result<ExperimentResult> {
             ..Default::default()
         },
         max_lr: 0.02,
-        token_augment: Some(0.05),
         ..Default::default()
     };
     run_experiment(config, device)
@@ -269,14 +264,13 @@ pub fn v13_token_augment(device: Device) -> anyhow::Result<ExperimentResult> {
 pub fn v14_adaptive_dropout(device: Device) -> anyhow::Result<ExperimentResult> {
     let config = ExperimentConfig {
         name: "v14_adaptive_dropout".to_string(),
-        description: "Adaptive dropout: 0.05 -> 0.2 over 400 steps".to_string(),
+        description: "Lower dropout 0.10 with QK norm".to_string(),
         model_config: GPTConfig {
             n_layer: 8, n_head: 9, d_model: 576,
-            dropout: 0.05, qk_norm: true, rope_theta: 1000.0,
+            dropout: 0.10, qk_norm: true, rope_theta: 1000.0,
             ..Default::default()
         },
         max_lr: 0.02,
-        adaptive_dropout: Some((0.05, 0.2, 400)),
         ..Default::default()
     };
     run_experiment(config, device)

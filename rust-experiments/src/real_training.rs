@@ -7,9 +7,46 @@ use crate::{
     ema::ModelEma,
     muon::{MuonOptimizer, split_param_groups},
 };
-use candle_core::{Device, Result, Tensor, IndexOp};
+use candle_core::{Device, Result, Tensor, IndexOp, Var};
+use candle_core::backprop::GradStore;
 use candle_nn::{Optimizer, AdamW, ParamsAdamW, VarMap};
 use std::time::{Duration, Instant};
+
+/// Clip gradient global L2 norm to max_norm.
+fn clip_grad_norm(varmap: &VarMap, grads: &mut GradStore, max_norm: f64) -> Result<()> {
+    let mut total_sq = 0.0f64;
+    let mut grad_list: Vec<(Var, Tensor)> = Vec::new();
+
+    let data = varmap.data().lock().unwrap();
+    for (_, var) in data.iter() {
+        if let Some(g) = grads.remove(var) {
+            let g_detached = g.detach();
+            let sq = g_detached.sqr()?.sum_all()?.to_vec0::<f32>()? as f64;
+            total_sq += sq;
+            grad_list.push((var.clone(), g_detached));
+        }
+    }
+    drop(data);
+
+    let total_norm = total_sq.sqrt();
+    let scale = if total_norm > max_norm {
+        max_norm / total_norm
+    } else {
+        1.0
+    };
+
+    for (var, g) in grad_list {
+        let clipped = if scale < 1.0 {
+            let scale_t = Tensor::new(scale as f32, g.device())?;
+            g.broadcast_mul(&scale_t)?
+        } else {
+            g
+        };
+        grads.insert(&var, clipped);
+    }
+
+    Ok(())
+}
 
 pub struct RealTrainingConfig {
     pub model_config: GPTConfig,
@@ -206,32 +243,41 @@ impl RealTrainer {
 
     fn training_step(&mut self) -> Result<f64> {
         let (input, targets) = self.data_loader.get_train_batch()?;
-        let logits = self.model.forward(&input)?;
+        let logits = self.model.forward(&input, true)?;
         let loss = self.cross_entropy_loss(&logits, &targets)?;
 
+        let loss_val = loss.to_vec0::<f32>()? as f64;
+
         if let Some(opt) = &mut self.muon_optimizer {
-            opt.backward_step(&loss)?;
+            let mut grads = loss.backward()?;
+            clip_grad_norm(&self.varmap, &mut grads, 1.0)?;
+            opt.step(&grads)?;
         } else if let Some(opt) = &mut self.optimizer {
-            opt.backward_step(&loss)?;
+            let mut grads = loss.backward()?;
+            clip_grad_norm(&self.varmap, &mut grads, 1.0)?;
+            opt.step(&grads)?;
         }
 
-        Ok(loss.to_vec0::<f32>()? as f64)
+        Ok(loss_val)
     }
 
     fn evaluate(&mut self) -> Result<f64> {
         self.data_loader.reset_val_ptr();
-        let mut total_loss = 0.0;
-        let mut num_batches = 0;
+        let mut total_ce = 0.0f64;
+        let mut total_tokens = 0usize;
 
-        for _ in 0..5 {
-            let (input, targets) = self.data_loader.get_val_batch()?;
-            let logits = self.model.forward(&input)?;
-            let loss = self.cross_entropy_loss(&logits, &targets)?;
-            total_loss += loss.to_vec0::<f32>()? as f64;
-            num_batches += 1;
+        while let Some((input, targets)) = self.data_loader.next_val_batch()? {
+            let logits = self.model.forward(&input, false)?;
+            let (b, t, v) = logits.dims3()?;
+            let logits_flat = logits.reshape((b * t, v))?;
+            let targets_flat = targets.reshape((b * t,))?;
+            let loss = candle_nn::loss::cross_entropy(&logits_flat, &targets_flat)?;
+            let batch_loss = loss.to_vec0::<f32>()? as f64;
+            total_ce += batch_loss * (b * t) as f64;
+            total_tokens += b * t;
         }
 
-        Ok(total_loss / num_batches as f64)
+        Ok(total_ce / total_tokens as f64)
     }
 
     fn cross_entropy_loss(&self, logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
@@ -253,7 +299,7 @@ impl RealTrainer {
                 &self.config.device,
             )?;
 
-            let logits = self.model.forward(&input)?;
+            let logits = self.model.forward(&input, false)?;
             let seq_len = logits.dims()[1];
             let next_token_logits = logits.i((0, seq_len - 1))?;
             let probs = candle_nn::ops::softmax(&next_token_logits, 0)?;

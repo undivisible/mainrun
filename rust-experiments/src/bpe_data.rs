@@ -141,6 +141,39 @@ impl BpeDataLoader {
         self.val_ptr = 0;
     }
 
+    /// Non-overlapping val batch iterator. Returns None when exhausted.
+    pub fn next_val_batch(&mut self) -> Result<Option<(Tensor, Tensor)>> {
+        let span = self.sequence_length * self.batch_size + 1;
+        if self.val_ptr + span > self.val_ids.len() {
+            return Ok(None);
+        }
+
+        let batch_data = &self.val_ids[self.val_ptr..self.val_ptr + span];
+
+        let mut input_data = Vec::with_capacity(self.sequence_length * self.batch_size);
+        let mut target_data = Vec::with_capacity(self.sequence_length * self.batch_size);
+
+        for i in 0..self.sequence_length * self.batch_size {
+            input_data.push(batch_data[i]);
+            target_data.push(batch_data[i + 1]);
+        }
+
+        let input = Tensor::from_vec(
+            input_data,
+            (self.batch_size, self.sequence_length),
+            &self.device,
+        )?;
+
+        let targets = Tensor::from_vec(
+            target_data,
+            (self.batch_size, self.sequence_length),
+            &self.device,
+        )?;
+
+        self.val_ptr += span;
+        Ok(Some((input, targets)))
+    }
+
     pub fn train_ids(&self) -> &[u32] {
         &self.train_ids
     }

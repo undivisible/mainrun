@@ -2,7 +2,7 @@
 //! QK norm, weight tying, dropout, proper init, SwiGLU, NeoX parallel blocks.
 
 use candle_core::{Result, Tensor, D};
-use candle_nn::{Embedding, Linear, Module, VarBuilder, VarMap};
+use candle_nn::{Dropout, Embedding, Linear, Module, VarBuilder, VarMap};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +124,8 @@ pub struct CausalSelfAttention {
     proj: Linear,
     q_norm: Option<candle_nn::RmsNorm>,
     k_norm: Option<candle_nn::RmsNorm>,
-    dropout_p: f32,
+    attn_drop: Dropout,
+    resid_drop: Dropout,
     rope_theta: f32,
 }
 
@@ -152,13 +153,14 @@ impl CausalSelfAttention {
             proj,
             q_norm,
             k_norm,
-            dropout_p: config.dropout,
+            attn_drop: Dropout::new(config.dropout),
+            resid_drop: Dropout::new(config.dropout),
             rope_theta: config.rope_theta,
         })
     }
 
-    pub fn forward(&self, x: &Tensor, attn_mask: &Tensor) -> Result<Tensor> {
-        self.forward_inner(x, attn_mask, None, None, 0)
+    pub fn forward(&self, x: &Tensor, attn_mask: &Tensor, train: bool) -> Result<Tensor> {
+        self.forward_inner(x, attn_mask, None, None, 0, train)
     }
 
     /// Forward with KV cache for incremental decoding.
@@ -172,8 +174,6 @@ impl CausalSelfAttention {
         cache_v: Option<&Tensor>,
         offset: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        // We need to return new k, v for cache update
-        // Reuse forward_inner but also return k, v
         self.forward_inner_return_kv(x, attn_mask, cache_k, cache_v, offset)
     }
 
@@ -184,6 +184,7 @@ impl CausalSelfAttention {
         cache_k: Option<&Tensor>,
         cache_v: Option<&Tensor>,
         offset: usize,
+        train: bool,
     ) -> Result<Tensor> {
         let (b, t, c) = x.dims3()?;
         let device = x.device();
@@ -247,13 +248,15 @@ impl CausalSelfAttention {
         };
         let attn = attn.broadcast_add(&mask_flat)?;
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+        let attn = self.attn_drop.forward(&attn, train)?;
 
         let out = attn.matmul(&v_full)?;
 
         let out = out.reshape((b, self.n_head, t, self.head_dim))?
             .permute((0, 2, 1, 3))?
             .reshape((b, t, c))?;
-        self.proj.forward(&out)
+        let out = self.proj.forward(&out)?;
+        self.resid_drop.forward(&out, train)
     }
 
     fn forward_inner_return_kv(
@@ -337,6 +340,7 @@ pub struct SwiGLU {
     w_gate: Linear,
     w_up: Linear,
     w_out: Linear,
+    drop: Dropout,
 }
 
 impl SwiGLU {
@@ -345,13 +349,14 @@ impl SwiGLU {
         let w_gate = candle_nn::linear_no_bias(config.d_model, hidden, vb.pp("w_gate"))?;
         let w_up = candle_nn::linear_no_bias(config.d_model, hidden, vb.pp("w_up"))?;
         let w_out = candle_nn::linear_no_bias(hidden, config.d_model, vb.pp("w_out"))?;
-        Ok(Self { w_gate, w_up, w_out })
+        Ok(Self { w_gate, w_up, w_out, drop: Dropout::new(config.dropout) })
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub fn forward(&self, x: &Tensor, train: bool) -> Result<Tensor> {
         let gate = candle_nn::ops::silu(&self.w_gate.forward(x)?)?;
         let up = self.w_up.forward(x)?;
-        self.w_out.forward(&(gate * up)?)
+        let out = self.w_out.forward(&(gate * up)?)?;
+        self.drop.forward(&out, train)
     }
 }
 
@@ -374,9 +379,9 @@ impl Block {
         Ok(Self { attn_norm, mlp_norm, attn, mlp })
     }
 
-    pub fn forward(&self, x: &Tensor, attn_mask: &Tensor) -> Result<Tensor> {
-        let attn_out = self.attn.forward(&self.attn_norm.forward(x)?, attn_mask)?;
-        let mlp_out = self.mlp.forward(&self.mlp_norm.forward(x)?)?;
+    pub fn forward(&self, x: &Tensor, attn_mask: &Tensor, train: bool) -> Result<Tensor> {
+        let attn_out = self.attn.forward(&self.attn_norm.forward(x)?, attn_mask, train)?;
+        let mlp_out = self.mlp.forward(&self.mlp_norm.forward(x)?, train)?;
         Ok((x + attn_out + mlp_out)?)
     }
 
@@ -392,7 +397,7 @@ impl Block {
         let (attn_out, new_k, new_v) = self.attn.forward_with_cache(
             &normed, attn_mask, cache_k, cache_v, offset,
         )?;
-        let mlp_out = self.mlp.forward(&self.mlp_norm.forward(x)?)?;
+        let mlp_out = self.mlp.forward(&self.mlp_norm.forward(x)?, false)?;
         let out = (x + attn_out + mlp_out)?;
         Ok((out, new_k, new_v))
     }
@@ -406,8 +411,8 @@ pub struct GPT {
     token_emb: Embedding,
     blocks: Vec<Block>,
     ln_f: candle_nn::RmsNorm,
-    // head is tied to token_emb — we store the weight tensor separately
     head_weight: Tensor,
+    drop: Dropout,
 }
 
 impl GPT {
@@ -425,23 +430,26 @@ impl GPT {
         // Tied head: use token_emb weight for projection
         let head_weight = vb.get((config.vocab_size, config.d_model), "token_emb.weight")?;
 
+        let dropout_p = config.dropout;
         Ok(Self {
             config,
             token_emb,
             blocks,
             ln_f,
             head_weight,
+            drop: Dropout::new(dropout_p),
         })
     }
 
-    pub fn forward(&self, idx: &Tensor) -> Result<Tensor> {
+    pub fn forward(&self, idx: &Tensor, train: bool) -> Result<Tensor> {
         let (b, t) = idx.dims2()?;
         let attn_mask = title_boundary_attn_mask(idx, self.config.eos_id)?;
 
         let mut x = self.token_emb.forward(idx)?;
+        x = self.drop.forward(&x, train)?;
 
         for block in &self.blocks {
-            x = block.forward(&x, &attn_mask)?;
+            x = block.forward(&x, &attn_mask, train)?;
         }
 
         x = self.ln_f.forward(&x)?;

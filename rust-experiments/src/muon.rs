@@ -112,20 +112,29 @@ impl MuonOptimizer {
             let grad = grad.detach();
             let current = var.as_tensor().detach();
 
-            let wd_scaled = mul_scalar(&current, self.weight_decay, &self.device)?;
-            let grad_wd = grad.add(&wd_scaled)?;
-
-            let mom_prev = &self.muon_momentum[i];
-            let mom_scaled = mul_scalar(mom_prev, self.momentum, &self.device)?;
-            let grad_scaled = mul_scalar(&grad_wd, 1.0 - self.momentum, &self.device)?;
+            // Momentum buffer: buf = momentum * buf + (1 - momentum) * grad
+            let mom_scaled = mul_scalar(&self.muon_momentum[i], self.momentum, &self.device)?;
+            let grad_scaled = mul_scalar(&grad, 1.0 - self.momentum, &self.device)?;
             let new_momentum = mom_scaled.add(&grad_scaled)?;
             self.muon_momentum[i] = new_momentum.clone();
 
-            let orthogonalized = self.newton_schulz5(&new_momentum, 5)?;
+            // Nesterov: update = (1 - momentum) * grad + momentum * buf
+            let nesterov_grad = mul_scalar(&grad, 1.0 - self.momentum, &self.device)?;
+            let nesterov_buf = mul_scalar(&new_momentum, self.momentum, &self.device)?;
+            let nesterov_update = nesterov_grad.add(&nesterov_buf)?;
+
+            // Orthogonalize via Newton-Schulz
+            let orthogonalized = self.newton_schulz5(&nesterov_update, 5)?;
+
+            // LR adjustment: sqrt(max(1, A/B)) where A=rows, B=cols
             let (r, c) = new_momentum.dims2()?;
-            let scale = ((r.max(c) as f64) / (r.min(c) as f64)).sqrt() * self.lr;
+            let scale = (1.0_f64.max((r as f64) / (c as f64))).sqrt() * self.lr;
             let update = mul_scalar(&orthogonalized, scale, &self.device)?;
-            var.set(&current.sub(&update)?)?;
+
+            // Decoupled weight decay: param *= (1 - lr * wd)
+            let wd_scale = 1.0 - self.lr * self.weight_decay;
+            let current_wd = mul_scalar(&current, wd_scale, &self.device)?;
+            var.set(&current_wd.sub(&update)?)?;
         }
 
         // AdamW for 1D / embeddings
@@ -140,18 +149,19 @@ impl MuonOptimizer {
             let grad = grad.detach();
             let current = var.as_tensor().detach();
 
-            let wd_scaled = mul_scalar(&current, self.weight_decay, &self.device)?;
-            let grad_wd = grad.add(&wd_scaled)?;
+            // Decoupled weight decay for AdamW too
+            let wd_scale = 1.0 - self.adamw_lr * self.weight_decay;
+            let current_wd = mul_scalar(&current, wd_scale, &self.device)?;
 
             let m_prev = &self.adamw_m[i];
             let v_prev = &self.adamw_v[i];
 
             let m_scaled = mul_scalar(m_prev, self.adamw_beta1, &self.device)?;
-            let grad_m = mul_scalar(&grad_wd, 1.0 - self.adamw_beta1, &self.device)?;
+            let grad_m = mul_scalar(&grad, 1.0 - self.adamw_beta1, &self.device)?;
             let new_m = m_scaled.add(&grad_m)?;
 
             let v_scaled = mul_scalar(v_prev, self.adamw_beta2, &self.device)?;
-            let grad_sq = grad_wd.sqr()?;
+            let grad_sq = grad.sqr()?;
             let grad_v = mul_scalar(&grad_sq, 1.0 - self.adamw_beta2, &self.device)?;
             let new_v = v_scaled.add(&grad_v)?;
 
@@ -164,7 +174,7 @@ impl MuonOptimizer {
             let denom = add_scalar(&v_sqrt, self.adamw_eps, &self.device)?;
             let update = m_hat.broadcast_div(&denom)?;
             let update_scaled = mul_scalar(&update, self.adamw_lr, &self.device)?;
-            var.set(&current.sub(&update_scaled)?)?;
+            var.set(&current_wd.sub(&update_scaled)?)?;
         }
         Ok(())
     }
