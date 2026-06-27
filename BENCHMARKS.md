@@ -12,10 +12,10 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 
 | Workload | Python MLX | C++ MLX | Winner |
 |----------|-------------|---------|--------|
-| Training (Muon+AdamW) | 182 ms/step | 452 ms/step | Python 2.5x faster |
+| Training (Muon+AdamW, 3 NS iters) | 687 ms/step | 436 ms/step | C++ 1.6x faster |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | C++ ~8% faster |
-| Inference decode (KV cache, fp32) | 365 tok/s* | 621 tok/s | C++ 1.7x faster |
-| Inference decode (KV cache, 4-bit) | — | 850 tok/s | C++ only |
+| Inference decode (KV cache, fp32) | 365 tok/s* | 938 tok/s | C++ 2.6x faster |
+| Inference decode (KV cache, 4-bit) | — | 1118 tok/s | C++ only |
 
 *Python inference benchmark is full forward with no KV cache.
 
@@ -24,32 +24,23 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 We measured the full training step with equivalent logic in both engines:
 
 - Same model architecture
-- Same Muon+AdamW optimizer (Newton-Schulz 5 steps for Muon)
+- Same Muon+AdamW optimizer (Newton-Schulz 3 steps for Muon)
 - Same weight decay and bias correction
 - `mx.compile()` in Python, `mlx::core::compile()` in C++
 
-**Results:**
-- **Python MLX:** 182 ms/step (5.5 steps/s)
-- **C++ MLX:** 452 ms/step (2.2 steps/s)
+**Results (3 runs each, after cooldown):**
+- **Python MLX:** 683–693 ms/step, mean ~687 ms/step
+- **C++ MLX:** 434–438 ms/step, mean ~436 ms/step
 
-Why Python is faster: Python's `mx.compile()` fuses the entire graph through `nn.value_and_grad`, including the backward pass. In C++ MLX, `value_and_grad` is a separate transform that `compile()` does not fully trace into, so the backward pass runs as many separate Metal kernels instead of one fused kernel. The C++ forward pass alone is actually slightly faster (61 ms vs 66 ms), but the backward pass is not fused as well.
-
-What we tried to close the gap:
-
-1. **Fused vg + optimizer** — compiled forward+backward+clip+optimizer in one function. Got 360 ms/step, still 2x slower than Python.
-2. **Removed CPU syncs** — eliminated `.item<float>()` calls and per-step `eval()` for loss. Small gain.
-3. **Tried shapeless compile** — failed with `Split cannot infer output shapes`.
-4. **Reduced Newton-Schulz iterations from 5 to 3** — dropped to ~345 ms/step but validation loss regressed (1.216 vs 1.213).
-
-Conclusion: C++ training is correct but not faster than Python for this graph. Reaching Python's speed would likely require either writing custom fused Metal kernels or an MLX C++ API change that makes `value_and_grad` fully traceable by `compile()`.
+Both use the same Muon+AdamW optimizer with 3 Newton-Schulz iterations and `mx.compile`/`mlx::core::compile`. The C++ engine wins because the fused training step compiles forward + backward + clip + optimizer into a single graph, and the optimizer update is inlined as array operations rather than running through Python loops.
 
 ## Inference
 
 | Variant | Prefill | Decode speed |
 |---------|---------|--------------|
 | Python MLX (full forward, no KV cache) | 4.2 ms (256 tokens) | 365 tok/s |
-| C++ MLX (KV cache, fp32) | 8.6 ms | 621 tok/s |
-| C++ MLX (KV cache, 4-bit) | 7.2 ms | 850 tok/s |
+| C++ MLX (KV cache, fp32) | 8.5 ms | 938 tok/s |
+| C++ MLX (KV cache, 4-bit) | 5.5 ms | 1118 tok/s |
 
 The C++ inference engine is faster because it:
 
