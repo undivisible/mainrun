@@ -36,6 +36,7 @@ public:
 
     std::string generate(const std::string& prompt, int max_tokens, const SamplingConfig& sampling);
     BenchmarkResult benchmark(const std::string& prompt, int max_tokens, const SamplingConfig& sampling);
+    void quantize() { model_.quantize_for_inference(); }
 
 private:
     GPT model_;

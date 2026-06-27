@@ -25,6 +25,7 @@ int main(int argc, char** argv) {
   int top_k = 50;
   float top_p = 0.9f;
   bool do_benchmark = false;
+  bool use_quantization = false;
 
   for (; i < argc; i++) {
     std::string a = argv[i];
@@ -50,6 +51,7 @@ int main(int argc, char** argv) {
     else if (a == "--top-k") top_k = std::stoi(next("50"));
     else if (a == "--top-p") top_p = std::stof(next("0.9"));
     else if (a == "--benchmark") do_benchmark = true;
+    else if (a == "--quantize") use_quantization = true;
     else if (a == "--help" || a == "-h") {
       printf("Usage: %s [subcommand] [options]\n"
              "Subcommands:\n"
@@ -78,7 +80,8 @@ int main(int argc, char** argv) {
              "  --temperature F    (for infer)\n"
              "  --top-k N          (for infer)\n"
              "  --top-p F          (for infer)\n"
-             "  --benchmark        (for infer)\n", argv[0]);
+             "  --benchmark        (for infer)\n"
+             "  --quantize         (for infer, 4-bit weight quantization)\n", argv[0]);
       return 0;
     } else {
       fprintf(stderr, "unknown arg: %s\n", argv[i]);
@@ -92,6 +95,7 @@ int main(int argc, char** argv) {
     mc.vocab_size = data.vocab_size();
     mc.eos_id = data.eos_id();
     InferenceEngine engine(checkpoint, tok_path, mc);
+    if (use_quantization) engine.quantize();
     SamplingConfig s{temperature, top_k, top_p};
     if (do_benchmark) {
       auto r = engine.benchmark(prompt, max_tokens, s);

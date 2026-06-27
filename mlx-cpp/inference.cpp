@@ -262,11 +262,12 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
     mx::array logits = model_.forward_cached(idx, kv_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
+    mx::eval(last);
     uint32_t next = sample_token(last, sampling);
     tokens.push_back(next);
     int cached_len = T;
 
-    // Decode: one token at a time with KV cache
+    // Decode: one token at a time with KV cache + async_eval pipelining
     for (int step = 1; step < max_tokens; ++step) {
         if (static_cast<int>(next) == model_.config().eos_id) break;
         if (cached_len >= block_size_) {
@@ -284,6 +285,7 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
             cached_len += 1;
         }
         last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
+        mx::eval(last);
         next = sample_token(last, sampling);
         tokens.push_back(next);
     }
