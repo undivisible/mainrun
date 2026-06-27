@@ -244,9 +244,6 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     auto tokens = encode_text(prompt, tokenizer_path_);
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
-    int n_head = model_.config().n_head;
-    int d_model = model_.config().d_model;
-    int head_dim = d_model / n_head;
     int V = model_.config().vocab_size;
 
     bool quantized = model_.is_quantized();
@@ -263,8 +260,8 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
         }
     }
 
-    mx::array k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
-    mx::array v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+    mx::array k_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
+    mx::array v_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
 
     // Prefill
     int T = static_cast<int>(tokens.size());
@@ -298,8 +295,8 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
                 }
                 logits = model_.forward_decode_growing(idx2, kv_cache_growing, 0);
             } else {
-                k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
-                v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                k_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
+                v_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
                 logits = model_.forward_cached(idx2, k_cache, v_cache, 0);
             }
             cached_len = T;
@@ -324,9 +321,6 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     int prompt_tokens = static_cast<int>(tokens.size());
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
-    int n_head = model_.config().n_head;
-    int d_model = model_.config().d_model;
-    int head_dim = d_model / n_head;
     int V = model_.config().vocab_size;
 
     bool quantized = model_.is_quantized();
@@ -341,8 +335,8 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
         }
     }
 
-    mx::array k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
-    mx::array v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+    mx::array k_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
+    mx::array v_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
 
     using clock = std::chrono::steady_clock;
 
@@ -382,8 +376,8 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
                 }
                 logits = model_.forward_decode_growing(idx2, kv_cache_growing, 0);
             } else {
-                k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
-                v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                k_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
+                v_cache = mx::zeros({1, model_.config().n_head, block_size_, model_.config().d_model / model_.config().n_head}, mx::bfloat16);
                 logits = model_.forward_cached(idx2, k_cache, v_cache, 0);
             }
             cached_len = T;
