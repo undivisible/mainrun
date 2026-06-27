@@ -2,7 +2,7 @@
 
 **Hardware:** MacBook Pro 14-inch (M5 Pro, 2026) — 5+10 core CPU @ 4.61 GHz, 16-core GPU @ 1.62 GHz, 48 GB unified memory
 
-**Methodology:** All numbers are the median of 5 runs taken after a full cooldown, with the first run (compile warmup) discarded. Both engines use identical model weights, architecture, and hyperparameters. Numbers were stable across runs (±2%).
+**Methodology:** All numbers are the median of 5 runs taken after a full cooldown, with the first run (compile warmup) discarded. Both engines use identical model weights, architecture, and hyperparameters. C++ training runs were stable (434–452 ms/step, ±2%). C++ inference fp32 runs were stable (1283–1323 tok/s, ±2%). C++ 4-bit runs were stable after warmup (1863–1936 tok/s, ±2%). Python training benchmark averages 100 compiled steps (5 warmup discarded). Python inference benchmark averages 100 compiled forward passes (3 warmup discarded).
 
 Model:
 
@@ -16,10 +16,10 @@ Model:
 
 | Workload | Python MLX | C++ MLX | Notes |
 |----------|------------|---------|-------|
-| Training (Muon+AdamW, 3 NS iters) | 694 ms/step | 436 ms/step | 1.6x, apples-to-apples |
+| Training (Muon+AdamW, 3 NS iters) | 668 ms/step | 438 ms/step | 1.5x, apples-to-apples |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | ~8%, near parity |
-| Inference decode (fp32, KV cache) | — | 1270 tok/s | different architecture, see below |
-| Inference decode (4-bit, KV cache) | — | 1900 tok/s | changes weight precision |
+| Inference decode (fp32, KV cache) | — | 1308 tok/s | different architecture, see below |
+| Inference decode (4-bit, KV cache) | — | 1920 tok/s | changes weight precision |
 
 ## Training
 
@@ -31,8 +31,8 @@ The cleanest comparison in the set. Both engines implement the same thing:
 - `mx.compile()` in Python, `mlx::core::compile()` in C++
 
 **Results (median of 5 runs, warmup discarded):**
-- **Python MLX:** 694 ms/step
-- **C++ MLX:** 436 ms/step — **1.6x faster**
+- **Python MLX:** 668 ms/step (100-step average)
+- **C++ MLX:** 438 ms/step — **1.5x faster**
 
 The win comes from inlining the optimizer into the compiled graph. In Python, each optimizer step runs through Python loops over 74 parameter tensors even inside `mx.compile`, adding interpreter overhead and graph fragmentation. In C++, forward, backward, gradient clipping, and all optimizer updates are expressed as a single array-operation graph and compiled together. The Newton-Schulz iterations (3 matrix multiplications per Muon parameter) are where the overhead difference compounds most.
 
@@ -51,15 +51,15 @@ The win comes from inlining the optimizer into the compiled graph. In Python, ea
 | Decode loop sync | Per-token CPU-GPU round-trip | Every 128 steps |
 | Weight quantization | No | Optional 4-bit |
 
-The real claim is: **the C++ inference engine is a better-engineered decode loop**, not just a faster language. The 365 tok/s Python number is included as a baseline reference, not a fair competitor.
+The real claim is: **the C++ inference engine is a better-engineered decode loop**, not just a faster language. The 362 tok/s Python number is included as a baseline reference, not a fair competitor.
 
-**Results (median of 5 runs, 200 tokens, greedy):**
-- **C++ fp32:** 1270 tok/s
-- **C++ 4-bit:** 1900 tok/s
+**Results (median of 5 runs, 200 tokens, greedy, warmup discarded):**
+- **C++ fp32:** 1308 tok/s (range: 1283–1323)
+- **C++ 4-bit:** 1920 tok/s (range: 1863–1936, first run discarded as compile warmup)
 
 The jump from fp32 to 4-bit (1.5x) comes from reduced memory bandwidth on weight loads — the model is memory-bandwidth-bound at T=1 decode, so halving weight size has a direct effect. Note that 4-bit quantization changes the weight precision and may affect output quality.
 
-The key engineering win in the decode loop: keeping argmax GPU-resident and feeding it directly into the next forward pass eliminates the CPU-GPU round-trip that was the bottleneck. Syncing every 128 steps instead of every token limits Metal graph depth without stalling the pipeline. This alone took fp32 from ~995 tok/s to 1270, and 4-bit from ~1273 to 1900.
+The key engineering win in the decode loop: keeping argmax GPU-resident and feeding it directly into the next forward pass eliminates the CPU-GPU round-trip that was the bottleneck. Syncing every 128 steps instead of every token limits Metal graph depth without stalling the pipeline. This alone took fp32 from ~995 tok/s to 1308, and 4-bit from ~1273 to 1920.
 
 ## Optimizations implemented
 
