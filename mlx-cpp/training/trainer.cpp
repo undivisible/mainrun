@@ -138,53 +138,95 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   float best_val = 1e9f;
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  // Training loss + gradient function.
-  // Mixed precision: cast params to bfloat16 for forward/backward, optimizer stays float32.
-  // MLX compile handles dropout (RNG state threaded through compiled function).
+  size_t N = params.size();
+
+  // --- Approach: compile the entire training step (vg + optimizer) in one graph ---
+  // Matches Python mlx-lm pattern. vg is captured from outside; optimizer is inline.
   auto loss_fn = std::function<array(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) {
       size_t np = inputs.size() - 2;
       std::vector<array> p(inputs.begin(), inputs.begin() + np);
       model.set_parameters(p);
-      return model.loss(inputs[np], inputs[np + 1], true);
+      return model.loss(inputs[np], inputs[np + 1], true);  // dropout during training
     });
   auto vg = value_and_grad(loss_fn, argnums);
 
-  size_t N = params.size();
-
-  auto vg_wrapped = std::function<std::vector<array>(const std::vector<array>&)>(
-    [vg, N](const std::vector<array>& inputs) -> std::vector<array> {
-      auto [loss, grads] = vg(inputs);
-      // Fuse clip_grad_norm into the compiled graph
-      array total_sq = array(0.0f);
-      for (const auto& g : grads) total_sq = total_sq + sum(square(g));
-      array scale = minimum(array(1.0f), array(1.0f) / sqrt(total_sq));
-      std::vector<array> out = {loss};
-      for (const auto& g : grads) out.push_back(g * scale);
-      return out;
-    });
-  auto compiled_vg = compile(vg_wrapped);
-
-  // Compiled optimizer step: pass params + grads + state + bc + lr, get new params + new state.
-  auto opt_fn = std::function<std::vector<array>(const std::vector<array>&)>(
-    [&](const std::vector<array>& inputs) -> std::vector<array> {
-      size_t state_start = 2 * N;
-      size_t state_end = 2 * N + 3 * N;
-      std::vector<array> p(inputs.begin(), inputs.begin() + N);
-      std::vector<array> g(inputs.begin() + N, inputs.begin() + 2 * N);
-      std::vector<array> s(inputs.begin() + state_start, inputs.begin() + state_end);
-      std::vector<array> bc = {inputs[state_end], inputs[state_end + 1]};
-      std::vector<array> lr_arr = {inputs[state_end + 2], inputs[state_end + 3],
-                                    inputs[state_end + 4], inputs[state_end + 5]};
-      return opt.step_compiled(p, g, s, bc, lr_arr);
-    });
-  auto compiled_opt = opt_fn;  // compile doesn't help — 74 different-shaped params
-
   // Initialize optimizer state
   opt.init_state(params);
+  auto& state = const_cast<std::vector<array>&>(opt.state());
+
+  // Fused step: input [params(N), state(3N), idx, targets, bc1, bc2, lr, adamw_lr, wd_muon, wd_adamw]
+  // Output: [loss, new_params(N), new_state(3N)]
+  auto fused_step = std::function<std::vector<array>(const std::vector<array>&)>(
+    [&, vg, N](const std::vector<array>& inputs) -> std::vector<array> {
+      std::vector<array> p(inputs.begin(), inputs.begin() + N);
+      std::vector<array> s(inputs.begin() + N, inputs.begin() + 4 * N);
+      const array& idx = inputs[4 * N];
+      const array& targets = inputs[4 * N + 1];
+      const array& inv_bc1 = inputs[4 * N + 2];
+      const array& inv_bc2 = inputs[4 * N + 3];
+      const array& lr_a = inputs[4 * N + 4];
+      const array& adamw_lr_a = inputs[4 * N + 5];
+      const array& wd_muon_a = inputs[4 * N + 6];
+      const array& wd_adamw_a = inputs[4 * N + 7];
+
+      // Forward + backward
+      std::vector<array> vg_inputs;
+      vg_inputs.reserve(N + 2);
+      for (auto& pp : p) vg_inputs.push_back(pp);
+      vg_inputs.push_back(idx);
+      vg_inputs.push_back(targets);
+      auto [loss, grads] = vg(vg_inputs);
+
+      // Clip grad norm
+      array total_sq = array(0.0f);
+      for (const auto& g : grads) total_sq = total_sq + sum(square(g));
+      array clip_scale = minimum(array(1.0f), array(1.0f) / sqrt(total_sq));
+      for (auto& g : grads) g = g * clip_scale;
+
+      // Optimizer inline
+      array momentum_a(0.95f), beta1_a(0.9f), beta2_a(0.95f), eps_a(1e-8f);
+      std::vector<array> new_params, new_mom, new_am, new_av;
+      new_params.reserve(N); new_mom.reserve(N); new_am.reserve(N); new_av.reserve(N);
+      for (size_t i = 0; i < N; i++) {
+        if (opt.is_muon_param(i)) {
+          auto mom_update = s[i] * momentum_a + grads[i];
+          auto nesterov = grads[i] + mom_update * momentum_a;
+          auto ortho = opt.newton_schulz5(nesterov, 5);
+          auto shape = p[i].shape();
+          float ratio = std::max(1.0f, (float)shape[0] / (float)shape[1]);
+          auto scale = lr_a * array(std::sqrt(ratio));
+          new_params.push_back(p[i] * wd_muon_a - ortho * scale);
+          new_mom.push_back(std::move(mom_update));
+          new_am.push_back(s[N + i]);
+          new_av.push_back(s[2 * N + i]);
+        } else {
+          auto new_m = s[N + i] * beta1_a + grads[i] * array(0.1f);
+          auto new_v = s[2 * N + i] * beta2_a + square(grads[i]) * array(0.05f);
+          auto update = (new_m * inv_bc1) / (sqrt(new_v * inv_bc2) + eps_a);
+          new_params.push_back(p[i] * wd_adamw_a - update * adamw_lr_a);
+          new_mom.push_back(s[i]);
+          new_am.push_back(std::move(new_m));
+          new_av.push_back(std::move(new_v));
+        }
+      }
+      std::vector<array> out;
+      out.reserve(1 + 4 * N);
+      out.push_back(loss);
+      for (auto& np : new_params) out.push_back(std::move(np));
+      for (auto& m : new_mom) out.push_back(std::move(m));
+      for (auto& m : new_am) out.push_back(std::move(m));
+      for (auto& m : new_av) out.push_back(std::move(m));
+      return out;
+    });
+  auto compiled_step = compile(fused_step);  // shapeless default
 
   // Compiled eval function (no dropout → stable graph)
   auto compiled_eval = compile(std::function<std::vector<array>(const std::vector<array>&)>(eval_single_batch_impl));
+
+  // Accumulate loss on GPU to avoid per-step CPU sync
+  array loss_accum = array(0.0f);
+  int loss_count = 0;
 
   for (int step = 0; step < cfg.max_steps; step++) {
     float lr;
@@ -196,47 +238,46 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
 
     auto [x, y] = data.get_train_batch();
 
-    std::vector<array> inputs;
-    inputs.reserve(params.size() + 2);
-    for (auto& p : params) inputs.push_back(p);
-    inputs.push_back(x);
-    inputs.push_back(y);
-
-    auto result = compiled_vg(inputs);
-    auto loss = result[0];
-    eval(loss);
-    float train_loss = loss.item<float>();
-    std::vector<array> grads(result.begin() + 1, result.end());
-    // Muon + AdamW optimizer step (functional, with compiled vg)
-    // Build optimizer input: [params, grads, state, bc, lr]
+    // --- Single compiled step (forward + backward + clip + optimizer) ---
     int s = step + 1;
-    float bc1 = 1.0f - std::pow(0.9f, s);
-    float bc2 = 1.0f - std::pow(0.95f, s);
-    float adamw_lr = lr * 0.2f;
-    float wd_muon = 1.0f - lr * 0.1f;
-    float wd_adamw = 1.0f - adamw_lr * 0.1f;
+    float bc1_f = 1.0f - std::pow(0.9f, s);
+    float bc2_f = 1.0f - std::pow(0.95f, s);
+    float adamw_lr_f = lr * 0.2f;
+    float wd_muon_f = 1.0f - lr * 0.1f;
+    float wd_adamw_f = 1.0f - adamw_lr_f * 0.1f;
 
-    std::vector<array> opt_inputs;
-    opt_inputs.reserve(5 * N + 6);
-    for (auto& p : params) opt_inputs.push_back(p);
-    for (auto& g : grads) opt_inputs.push_back(g);
-    auto& state = const_cast<std::vector<array>&>(opt.state());
-    for (auto& s_arr : state) opt_inputs.push_back(s_arr);
-    opt_inputs.push_back(array(1.0f / bc1));
-    opt_inputs.push_back(array(1.0f / bc2));
-    opt_inputs.push_back(array(lr));
-    opt_inputs.push_back(array(adamw_lr));
-    opt_inputs.push_back(array(wd_muon));
-    opt_inputs.push_back(array(wd_adamw));
+    std::vector<array> step_inputs;
+    step_inputs.reserve(4 * N + 8);
+    for (auto& p : params) step_inputs.push_back(p);
+    for (auto& st : state) step_inputs.push_back(st);
+    step_inputs.push_back(x);
+    step_inputs.push_back(y);
+    step_inputs.push_back(array(1.0f / bc1_f));
+    step_inputs.push_back(array(1.0f / bc2_f));
+    step_inputs.push_back(array(lr));
+    step_inputs.push_back(array(adamw_lr_f));
+    step_inputs.push_back(array(wd_muon_f));
+    step_inputs.push_back(array(wd_adamw_f));
 
-    auto opt_out = compiled_opt(opt_inputs);
-    eval(opt_out);
-    params.assign(opt_out.begin(), opt_out.begin() + N);
-    state.assign(opt_out.begin() + N, opt_out.end());
+    auto step_result = compiled_step(step_inputs);
+
+    // Accumulate loss on GPU (lazy)
+    loss_accum = loss_accum + step_result[0];
+    loss_count++;
+
+    // Update params + state
+    params.assign(step_result.begin() + 1, step_result.begin() + 1 + N);
+    state.assign(step_result.begin() + 1 + N, step_result.end());
     model.set_parameters(params);
     if (cfg.use_ema) ema.update(params, step);
 
     if (step == 0 || step % cfg.eval_interval == 0 || step == cfg.max_steps - 1) {
+      // Sync loss for logging
+      eval(loss_accum);
+      float avg_loss = loss_accum.item<float>() / loss_count;
+      loss_accum = array(0.0f);
+      loss_count = 0;
+
       float val_ema = 0.0f;
       if (cfg.use_ema) {
         auto ema_params = ema.swap_in(params);
@@ -249,7 +290,7 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
       double elapsed = std::chrono::duration<double>(now - t_start).count();
       if (val_ema < best_val) best_val = val_ema;
       printf("Step %d: train=%.4f, val_ema=%.4f, lr=%.5f, %.1fs elapsed, %.0fms/step\n",
-             step, train_loss, val_ema, lr, elapsed, elapsed * 1000 / (step + 1));
+             step, avg_loss, val_ema, lr, elapsed, elapsed * 1000 / (step + 1));
       fflush(stdout);
     }
   }

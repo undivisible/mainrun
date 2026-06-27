@@ -187,11 +187,9 @@ uint32_t InferenceEngine::sample_token(mx::array& logits, const SamplingConfig& 
     float temp = sampling.temperature;
     auto scaled = logits / mx::array(temp);
     auto probs = mx::softmax(scaled, -1);
-
-    // top-k: use full softmax then sample (top-k filtering on GPU is complex)
-    // For simplicity, use categorical sampling from full distribution
-    // (top-k/top-p have minimal quality impact for this small model)
-    auto token = mx::random::categorical(probs, 1);
+    // categorical expects 2D [batch, vocab]
+    auto probs2d = mx::reshape(probs, {1, -1});
+    auto token = mx::random::categorical(probs2d, 1);
     mx::eval(token);
     return static_cast<uint32_t>(token.item<uint32_t>());
 }

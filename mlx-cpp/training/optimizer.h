@@ -24,6 +24,8 @@ public:
   const std::vector<mlx::core::array>& state() const { return state_; }
   bool initialized() const { return initialized_; }
   void init_state(const std::vector<mlx::core::array>& params) { init(params); }
+  bool is_muon_param(size_t i) const { return is_muon_[i]; }
+  mlx::core::array newton_schulz5(const mlx::core::array& g, int steps);
 
 private:
   float lr_, adamw_lr_, weight_decay_, beta1_, beta2_, eps_;
@@ -36,5 +38,4 @@ private:
   bool initialized_ = false;
 
   void init(const std::vector<mlx::core::array>& params);
-  mlx::core::array newton_schulz5(const mlx::core::array& g, int steps);
 };
