@@ -1,6 +1,6 @@
 import mlx.core as mx
 import mlx.nn as nn
-import time, json, sys
+import time, json
 
 with open('../data/tokenized_data_24k.json') as f:
     d = json.load(f)
@@ -33,7 +33,7 @@ class MLXGPT(nn.Module):
     def rmsn(self, x, w):
         return mx.fast.rms_norm(x, w, 1e-5)
 
-    def __call__(self, idx):
+    def forward_full(self, idx):
         B, T = idx.shape
         x = self.token_emb(idx)
         scale = 1.0 / (head_dim ** 0.5)
@@ -63,46 +63,91 @@ class MLXGPT(nn.Module):
         x = self.rmsn(x, self.ln_f_w)
         return (x.reshape(B*T, d_model) @ self.token_emb.weight.T).reshape(B, T, vocab_size)
 
+    def forward_cached(self, idx, kv_cache, prev_len):
+        """T=1 decode with growing KV cache (concatenate per step, matches C++ path)."""
+        B, T = idx.shape
+        x = self.token_emb(idx)
+        scale = 1.0 / (head_dim ** 0.5)
+        for li, b in enumerate(self.blocks):
+            h = self.rmsn(x, b['attn_norm_w'])
+            hf = h.reshape(B*T, d_model)
+            qkv = (hf @ b['qkv_w'].T).reshape(B, T, 3*d_model)
+            q, k, v = mx.split(qkv, 3, axis=-1)
+            q = q.reshape(B, T, n_head, head_dim).transpose(0, 2, 1, 3)
+            k = k.reshape(B, T, n_head, head_dim).transpose(0, 2, 1, 3)
+            v = v.reshape(B, T, n_head, head_dim).transpose(0, 2, 1, 3)
+            q = mx.fast.rope(q, head_dim, traditional=False, base=1000.0, scale=1.0, offset=prev_len)
+            k = mx.fast.rope(k, head_dim, traditional=False, base=1000.0, scale=1.0, offset=prev_len)
+            q = self.rmsn(q, b['q_norm_w'])
+            k = self.rmsn(k, b['k_norm_w'])
+            if prev_len == 0:
+                kv_cache[li] = (k, v)
+            else:
+                kv_cache[li] = (mx.concatenate([kv_cache[li][0], k], axis=2),
+                                mx.concatenate([kv_cache[li][1], v], axis=2))
+            kc, vc = kv_cache[li]
+            attn = mx.fast.scaled_dot_product_attention(q, kc, vc, scale=scale, mask="causal")
+            attn = attn.transpose(0, 2, 1, 3).reshape(B*T, d_model)
+            attn = (attn @ b['proj_w'].T).reshape(B, T, d_model)
+            m = self.rmsn(x, b['mlp_norm_w'])
+            mf = m.reshape(B*T, d_model)
+            gate = (mf @ b['w_gate'].T).reshape(B, T, hidden)
+            up = (mf @ b['w_up'].T).reshape(B, T, hidden)
+            out = (gate * mx.sigmoid(gate) * up).reshape(B*T, hidden) @ b['w_out'].T
+            x = x + attn + out.reshape(B, T, d_model)
+        x = self.rmsn(x, self.ln_f_w)
+        return (x.reshape(B*T, d_model) @ self.token_emb.weight.T).reshape(B, T, vocab_size)
+
 model = MLXGPT()
 
-# Full forward (no KV cache) — baseline
-def forward_full(idx):
-    return model(idx)
+# --- No KV cache: full forward every step (original baseline) ---
+forward_c = mx.compile(model.forward_full)
 
-forward_c = mx.compile(forward_full)
-
-# Greedy decode, no KV cache (full recompute each step)
-prompt = mx.array([[1, 2, 3, 4, 5]], dtype=mx.uint32)
-# Warmup
-for _ in range(3):
-    logits = forward_c(prompt)
-    mx.eval(logits)
-
-# Benchmark prefill
 T = 256
 idx = mx.random.randint(0, vocab_size, (1, T), dtype=mx.uint32)
 mx.eval(idx)
 for _ in range(3):
-    logits = forward_c(idx)
-    mx.eval(logits)
+    mx.eval(forward_c(idx))
 
 t0 = time.time()
 for _ in range(20):
-    logits = forward_c(idx)
-    mx.eval(logits)
+    mx.eval(forward_c(idx))
 elapsed = time.time() - t0
-print(f'MLX Python prefill ({T} tokens): {elapsed/20*1000:.1f}ms/batch')
+print(f'Python MLX prefill ({T} tokens, no KV cache): {elapsed/20*1000:.1f}ms')
 
-# Benchmark decode (single token, full recompute — no KV cache in this simple bench)
-idx_single = mx.random.randint(0, vocab_size, (1, 1), dtype=mx.uint32)
-mx.eval(idx_single)
+idx_one = mx.random.randint(0, vocab_size, (1, 1), dtype=mx.uint32)
+mx.eval(idx_one)
 for _ in range(3):
-    logits = forward_c(idx_single)
-    mx.eval(logits)
+    mx.eval(forward_c(idx_one))
 
 t0 = time.time()
 for _ in range(100):
-    logits = forward_c(idx_single)
-    mx.eval(logits)
+    mx.eval(forward_c(idx_one))
 elapsed = time.time() - t0
-print(f'MLX Python decode (1 token, full forward): {elapsed/100*1000:.1f}ms/token, {100/elapsed:.0f} tok/s')
+print(f'Python MLX decode (no KV cache, full recompute): {elapsed/100*1000:.1f}ms/tok, {100/elapsed:.0f} tok/s')
+
+# --- KV cache: growing concatenate per step (apples-to-apples with C++) ---
+max_tokens = 200
+prompt_ids = mx.array(d['train_ids'][:5], dtype=mx.uint32).reshape(1, 5)
+mx.eval(prompt_ids)
+
+def run_kv_decode(n_tokens):
+    kv_cache = [None] * n_layer
+    idx = prompt_ids
+    prev_len = 0
+    logits = model.forward_cached(idx, kv_cache, prev_len)
+    mx.eval(logits)
+    prev_len = idx.shape[1]
+    t0 = time.time()
+    for _ in range(n_tokens):
+        next_tok = mx.argmax(logits[0, -1, :]).reshape(1, 1).astype(mx.uint32)
+        logits = model.forward_cached(next_tok, kv_cache, prev_len)
+        mx.eval(logits)
+        prev_len += 1
+    return time.time() - t0, n_tokens
+
+# Warmup
+run_kv_decode(5)
+
+elapsed, n = run_kv_decode(max_tokens)
+print(f'Python MLX decode (KV cache, fp32): {elapsed/n*1000:.2f}ms/tok, {n/elapsed:.0f} tok/s')

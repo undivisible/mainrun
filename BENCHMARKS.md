@@ -18,8 +18,9 @@ Model:
 |----------|------------|---------|-------|
 | Training (Muon+AdamW, 3 NS iters) | 668 ms/step | 438 ms/step | 1.5x, apples-to-apples |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | ~8%, near parity |
-| Inference decode (fp32, KV cache) | — | 1308 tok/s | different architecture, see below |
-| Inference decode (4-bit, KV cache) | — | 1920 tok/s | changes weight precision |
+| Inference decode (no KV cache, full recompute) | 367 tok/s | — | baseline reference only |
+| Inference decode (KV cache, fp32) | 769 tok/s | 1308 tok/s | 1.7x, apples-to-apples |
+| Inference decode (KV cache, 4-bit) | — | 1920 tok/s | changes weight precision |
 
 ## Training
 
@@ -42,24 +43,25 @@ The win comes from inlining the optimizer into the compiled graph. In Python, ea
 
 ## Inference
 
-**The comparison to the Python inference script (365 tok/s) is intentionally not framed as a direct speed ratio**, because the two implementations are architecturally different:
+Both Python and C++ engines now use equivalent decode loops: growing KV cache with concatenate, same fast MLX primitives, same greedy sampling, 200 tokens from the same prompt.
 
-| Feature | Python script | C++ engine |
-|---------|--------------|------------|
-| KV cache | No — full forward every step | Yes |
-| Sampling | CPU (`item()` + Python) | GPU-resident argmax/categorical |
-| Decode loop sync | Per-token CPU-GPU round-trip | Every 128 steps |
+| Feature | Python MLX | C++ MLX |
+|---------|-----------|---------|
+| KV cache | Yes (growing concatenate) | Yes (growing concatenate) |
+| Sampling | CPU (`argmax` + `item()` per step) | GPU-resident, no round-trip |
+| Decode loop sync | Per-token CPU-GPU sync | Every 128 steps |
 | Weight quantization | No | Optional 4-bit |
 
-The real claim is: **the C++ inference engine is a better-engineered decode loop**, not just a faster language. The 362 tok/s Python number is included as a baseline reference, not a fair competitor.
-
-**Results (median of 5 runs, 200 tokens, greedy, warmup discarded):**
-- **C++ fp32:** 1308 tok/s (range: 1283–1323)
+**Results (200 tokens, greedy, KV cache):**
+- **Python MLX fp32:** 769 tok/s
+- **C++ fp32:** 1308 tok/s — **1.7x faster**
 - **C++ 4-bit:** 1920 tok/s (range: 1863–1936, first run discarded as compile warmup)
 
-The jump from fp32 to 4-bit (1.5x) comes from reduced memory bandwidth on weight loads — the model is memory-bandwidth-bound at T=1 decode, so halving weight size has a direct effect. Note that 4-bit quantization changes the weight precision and may affect output quality.
+The 1.7x gap between equivalent Python and C++ KV cache loops comes from two things: C++ keeps argmax GPU-resident and feeds it directly into the next forward pass (no `item()` round-trip), and syncs only every 128 steps instead of every token. The Python loop syncs on every `mx.eval(logits)` call.
 
-The key engineering win in the decode loop: keeping argmax GPU-resident and feeding it directly into the next forward pass eliminates the CPU-GPU round-trip that was the bottleneck. Syncing every 128 steps instead of every token limits Metal graph depth without stalling the pipeline. This alone took fp32 from ~995 tok/s to 1308, and 4-bit from ~1273 to 1920.
+The 367 tok/s no-KV-cache number is kept as a historical baseline reference only — it recomputes the full forward pass every step and is not a fair comparison.
+
+The jump from C++ fp32 to 4-bit (1.5x) comes from reduced memory bandwidth on weight loads. The model is memory-bandwidth-bound at T=1 decode, so narrower weights have a direct effect. Note that 4-bit quantization changes weight precision and may affect output quality.
 
 ## Optimizations implemented
 
