@@ -14,8 +14,8 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 |----------|-------------|---------|--------|
 | Training (Muon+AdamW, 3 NS iters) | 694 ms/step | 453 ms/step | C++ 1.5x faster |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | C++ ~8% faster |
-| Inference decode (KV cache, fp32) | 365 tok/s* | 995 tok/s | C++ 2.7x faster |
-| Inference decode (KV cache, 4-bit) | — | 1273 tok/s | C++ only |
+| Inference decode (KV cache, fp32) | 365 tok/s* | 1270 tok/s | C++ 3.5x faster |
+| Inference decode (KV cache, 4-bit) | — | 1900 tok/s | C++ only |
 
 *Python inference benchmark is full forward with no KV cache.
 
@@ -39,15 +39,16 @@ Both use the same Muon+AdamW optimizer with 3 Newton-Schulz iterations and `mx.c
 | Variant | Prefill | Decode speed |
 |---------|---------|--------------|
 | Python MLX (full forward, no KV cache) | 4.2 ms (256 tokens) | 365 tok/s |
-| C++ MLX (KV cache, fp32) | 8.8 ms | 995 tok/s |
-| C++ MLX (KV cache, 4-bit) | 5.9 ms | 1273 tok/s |
+| C++ MLX (KV cache, fp32) | 7.5 ms | 1270 tok/s |
+| C++ MLX (KV cache, 4-bit) | 4.5 ms | 1900 tok/s |
 
 The C++ inference engine is faster because it:
 
 1. **Uses a KV cache** — avoids recomputing past tokens each step.
 2. **Uses fast MLX primitives** — `fast::rms_norm`, `fast::rope`, `fast::scaled_dot_product_attention`.
 3. **Moves sampling to the GPU** — `argmax` and `categorical` stay on Metal, avoiding CPU sync.
-4. **Supports 4-bit weight quantization** — `quantized_matmul` reduces memory bandwidth and matmul cost.
+4. **Eliminates per-token CPU-GPU sync** — the decode loop keeps argmax results on GPU and feeds them directly to the next step, only syncing every 128 steps to limit graph depth. This removes the CPU-GPU round-trip bottleneck that limited throughput to ~1273 tok/s, achieving ~1900 tok/s instead.
+5. **Supports 4-bit weight quantization** — `quantized_matmul` reduces memory bandwidth and matmul cost.
 
 ## Optimizations implemented
 
@@ -55,6 +56,7 @@ The C++ inference engine is faster because it:
 - **Compiled SwiGLU** (`mlx-cpp/model.cpp`): gate * sigmoid(gate) * up fused into one kernel.
 - **Fast kernels**: `fast::rope`, `fast::rms_norm`, `fast::scaled_dot_product_attention`, `quantized_matmul`.
 - **Avoid CPU sync in decode loop**: `forward_decode_growing` takes `int prev_len` instead of an array, removing a per-step GPU→CPU sync.
+- **GPU-only decode loop**: benchmark keeps argmax on GPU across steps, feeds directly to next forward pass, syncs only every 128 steps. Eliminates CPU-GPU round-trip per token.
 - **Training engine** (`mlx-cpp/training/`): Muon+AdamW optimizer, gradient clipping, EMA, compiled eval, WSD/cosine LR schedules.
 - **Restructured** `mlx-cpp/` into `inference/` and `training/` folders.
 
@@ -62,7 +64,8 @@ The C++ inference engine is faster because it:
 
 - **ZMLX-style fused rmsnorm+residual**: manual rmsnorm (mean+square+rsqrt) replaced `fast::rms_norm`, which is already a single hand-tuned Metal kernel. Result dropped from 621 tok/s to 86 tok/s. Reverted.
 - **Compiled decode with pre-allocated KV cache**: shape instability from `fast::rope` with array offsets and `split` shape inference failed. Reverted.
-- **Compiled growing-cache decode**: `split` cannot infer output shapes with dynamic cache lengths. Reverted.
+- **Compiled growing-cache decode**: `split` and `slice` cannot infer output shapes with `shapeless=true` compile. Reverted.
+- **Stable cache for quantized**: scatter+slice path avoids O(N²) concatenate but was slower at 200 tokens (1150 vs 1273 tok/s) due to scatter overhead. Compiled mask-based path was also slower (1108 tok/s) due to attending over full block_size. Reverted.
 - **Float16 inference**: `float16` weights/activations and cache were slower than `bfloat16` (likely due to recompilation overhead). Reverted.
 - **Fused full training step**: marginal gains only; Python still wins.
 

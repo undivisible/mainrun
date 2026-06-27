@@ -352,17 +352,29 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
         ? model_.forward_decode_growing(idx, kv_cache_growing, 0)
         : model_.forward_cached(idx, k_cache, v_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
-    uint32_t next = sample_token(last, sampling);
-    tokens.push_back(next);
+
+    // GPU-only decode loop: keep argmax on GPU, feed directly to next step.
+    // No per-token CPU sync — the GPU processes kernels back-to-back.
+    bool greedy = sampling.temperature <= 0.01f;
+    mx::array next_token = greedy
+        ? mx::argmax(last, -1)
+        : mx::random::categorical(mx::reshape(
+              mx::softmax(last / mx::array(sampling.temperature), -1), {1, -1}), 1);
+    next_token = mx::astype(mx::reshape(next_token, {1, 1}), mx::uint32);
+    mx::eval(next_token); // sync for accurate prefill timing
+
     int cached_len = T;
     auto t1 = clock::now();
     double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     int generated = 1;
-    bool stopped = (static_cast<int>(next) == model_.config().eos_id);
 
-    while (!stopped && generated < max_tokens) {
+    for (int step = 1; step < max_tokens; ++step) {
         if (cached_len >= block_size_) {
+            // Window reset: need CPU sync to get recent tokens
+            mx::eval(next_token);
+            uint32_t nt = next_token.item<uint32_t>();
+            tokens.push_back(nt);
             int start = static_cast<int>(tokens.size()) - block_size_;
             std::vector<uint32_t> window(tokens.begin() + start, tokens.end());
             T = block_size_;
@@ -382,18 +394,37 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
             }
             cached_len = T;
         } else {
-            mx::array one(mx::array(&next, {1, 1}, mx::uint32));
             logits = quantized
-                ? model_.forward_decode_growing(one, kv_cache_growing, cached_len)
-                : model_.forward_cached(one, k_cache, v_cache, cached_len);
+                ? model_.forward_decode_growing(next_token, kv_cache_growing, cached_len)
+                : model_.forward_cached(next_token, k_cache, v_cache, cached_len);
             cached_len += 1;
         }
+
         last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
-        next = sample_token(last, sampling);
-        tokens.push_back(next);
+        next_token = greedy
+            ? mx::argmax(last, -1)
+            : mx::random::categorical(mx::reshape(
+                  mx::softmax(last / mx::array(sampling.temperature), -1), {1, -1}), 1);
+        next_token = mx::astype(mx::reshape(next_token, {1, 1}), mx::uint32);
         ++generated;
-        if (static_cast<int>(next) == model_.config().eos_id) stopped = true;
+
+        // Periodic sync to limit graph depth and materialize KV cache
+        if ((step % 32) == 0 && cached_len < block_size_) {
+            mx::eval(next_token);
+            if (quantized) {
+                for (auto& [k, v] : kv_cache_growing) {
+                    mx::eval(k);
+                    mx::eval(v);
+                }
+            } else {
+                mx::eval(k_cache);
+                mx::eval(v_cache);
+            }
+        }
     }
+
+    // Final sync to ensure all GPU work is complete
+    mx::eval(next_token);
 
     auto t2 = clock::now();
     double total_s = std::chrono::duration<double>(t2 - t0).count();
