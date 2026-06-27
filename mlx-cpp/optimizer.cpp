@@ -81,17 +81,17 @@ std::vector<array> Optimizer::step(const std::vector<array>& params,
 
   for (size_t i = 0; i < params.size(); i++) {
     if (is_muon_[i]) {
-      // --- Muon update ---
+      // --- Muon update (matches PyTorch torch.optim.Muon) ---
       float momentum = 0.95f;
 
-      // buf = momentum * buf + (1 - momentum) * grad
-      muon_mom_[i] = muon_mom_[i] * array(momentum) + grads[i] * array(1.0f - momentum);
+      // buf = momentum * buf + grad  (NO 1-momentum scaling, unlike standard SGD momentum)
+      muon_mom_[i] = muon_mom_[i] * array(momentum) + grads[i];
 
-      // Nesterov: update = (1 - momentum) * grad + momentum * buf
-      auto nesterov = grads[i] * array(1.0f - momentum) + muon_mom_[i] * array(momentum);
+      // Nesterov: update = grad + momentum * buf
+      auto nesterov = grads[i] + muon_mom_[i] * array(momentum);
 
       // Orthogonalize
-      auto ortho = newton_schulz5(nesterov, 3);
+      auto ortho = newton_schulz5(nesterov, 5);
 
       // LR adjustment: sqrt(max(1, A/B)) where A=rows, B=cols
       auto shape = params[i].shape();

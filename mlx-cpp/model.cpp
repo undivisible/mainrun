@@ -1,5 +1,4 @@
 #include "model.h"
-#include <mlx/fast.h>
 
 #include <cmath>
 #include <random>
@@ -42,7 +41,7 @@ GPT::GPT(const GPTConfig& cfg)
       hidden_(static_cast<int>(cfg.swiglu_mult * cfg.d_model)),
       token_emb_(0.0f),
       ln_f_w_(0.0f) {
-    std::mt19937 gen(42);
+    std::mt19937 gen(1337);
     float std = 0.02f;
     token_emb_ = normal_array(gen, 0.0f, std, {cfg_.vocab_size, cfg_.d_model});
     blocks_ = make_blocks(gen, cfg_, head_dim_, hidden_);
@@ -132,8 +131,11 @@ array GPT::forward(const array& idx, bool train) {
             k = rmsnorm(k, b.k_norm_w);
         }
 
-        // ponytail: use MLX fused SDPA kernel instead of manual matmul+softmax+matmul
-        auto attn_out = fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
+        // Manual attention: needed for attention dropout (MLX SDPA has no dropout param)
+        auto scores = matmul(q, transpose(k, {0, 1, 3, 2})) * attn_scale + mask;
+        auto weights = softmax(scores, -1);
+        if (train) weights = dropout_(weights);
+        auto attn_out = matmul(weights, v);
 
         attn_out = transpose(attn_out, {0, 2, 1, 3});
         attn_out = reshape(attn_out, {B * T, cfg_.d_model});

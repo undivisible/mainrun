@@ -2,7 +2,6 @@
 #include "model.h"
 #include "optimizer.h"
 #include <mlx/transforms.h>
-#include <mlx/compile.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -114,10 +113,8 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   float best_val = 1e9f;
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  // ponytail: compile the loss+grad function once. Pass x,y as trailing args
-  // so the graph is cached and Metal kernels are reused across steps.
-  // inputs = [params..., x, y], argnums = [0..n_params-1]
-  enable_compile();
+  // ponytail: compile disabled — dropout generates new random masks each step,
+  // causing graph recompilation overhead that's worse than no compilation.
   auto loss_fn = std::function<array(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) {
       size_t np = inputs.size() - 2;
