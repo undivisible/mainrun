@@ -12,7 +12,7 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 
 | Workload | Python MLX | C++ MLX | Winner |
 |----------|-------------|---------|--------|
-| Training (Muon+AdamW, 3 NS iters) | 687 ms/step | 436 ms/step | C++ 1.6x faster |
+| Training (Muon+AdamW, 3 NS iters) | 694 ms/step | 453 ms/step | C++ 1.5x faster |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | C++ ~8% faster |
 | Inference decode (KV cache, fp32) | 365 tok/s* | 995 tok/s | C++ 2.7x faster |
 | Inference decode (KV cache, 4-bit) | — | 1273 tok/s | C++ only |
@@ -28,9 +28,9 @@ We measured the full training step with equivalent logic in both engines:
 - Same weight decay and bias correction
 - `mx.compile()` in Python, `mlx::core::compile()` in C++
 
-**Results (3 runs each, after cooldown):**
-- **Python MLX:** 683–693 ms/step, mean ~687 ms/step
-- **C++ MLX:** 434–438 ms/step, mean ~436 ms/step
+**Results (single clean run, after cooldown):**
+- **Python MLX:** 694 ms/step
+- **C++ MLX:** 453 ms/step
 
 Both use the same Muon+AdamW optimizer with 3 Newton-Schulz iterations and `mx.compile`/`mlx::core::compile`. The C++ engine wins because the fused training step compiles forward + backward + clip + optimizer into a single graph, and the optimizer update is inlined as array operations rather than running through Python loops.
 
@@ -95,5 +95,5 @@ python3 benchmark_forward_py.py
 ## Notes
 
 - Benchmarks are sensitive to thermal state. Numbers above were taken after a cooldown period.
-- C++ training is now faster than Python after fixing the Python benchmark to actually train.
+- C++ training is faster than Python MLX on the same model and optimizer.
 - C++ inference is faster than Python thanks to the KV cache, GPU sampling, and 4-bit quantization.
