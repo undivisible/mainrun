@@ -1,6 +1,6 @@
 #include "data.h"
-#include "training.h"
-#include "inference.h"
+#include "training/trainer.h"
+#include "inference/engine.h"
 #include "model.h"
 #include <cstdio>
 #include <string>

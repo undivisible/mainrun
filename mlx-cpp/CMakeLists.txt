@@ -8,13 +8,13 @@ find_package(MLX REQUIRED HINTS /opt/homebrew/share/cmake/MLX)
 add_executable(train
   main.cpp
   model.cpp
-  optimizer.cpp
   data.cpp
-  training.cpp
-  inference.cpp
+  inference/engine.cpp
+  training/trainer.cpp
+  training/optimizer.cpp
 )
 
-target_include_directories(train PRIVATE /opt/homebrew/include)
+target_include_directories(train PRIVATE /opt/homebrew/include ${CMAKE_SOURCE_DIR})
 target_link_directories(train PRIVATE /opt/homebrew/lib)
 target_link_libraries(train PRIVATE mlx)
 target_compile_options(train PRIVATE -O2 -Wall -Wextra)

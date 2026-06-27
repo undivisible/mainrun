@@ -1,4 +1,4 @@
-#include "inference.h"
+#include "inference/engine.h"
 
 #include <cstdio>
 #include <cstdlib>

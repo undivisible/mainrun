@@ -1,7 +1,7 @@
-#include "training.h"
+#include "training/trainer.h"
 #include "model.h"
-#include "optimizer.h"
-#include "inference.h"
+#include "training/optimizer.h"
+#include "inference/engine.h"
 #include <mlx/transforms.h>
 #include <mlx/compile.h>
 #include <mlx/memory.h>
