@@ -30,14 +30,21 @@ void Optimizer::init(const std::vector<array>& params) {
     is_muon_[i] = is_2d && !is_embedding;
     if (is_muon_[i]) {
       muon_mom_.push_back(zeros_like(params[i]));
-      adamw_m_.push_back(array(0.0f));
-      adamw_v_.push_back(array(0.0f));
+      adamw_m_.push_back(zeros_like(params[i]));
+      adamw_v_.push_back(zeros_like(params[i]));
     } else {
-      muon_mom_.push_back(array(0.0f));  // placeholder, never used
+      muon_mom_.push_back(zeros_like(params[i]));
       adamw_m_.push_back(zeros_like(params[i]));
       adamw_v_.push_back(zeros_like(params[i]));
     }
   }
+  // Build flat state vector: [muon_mom_..., adamw_m_..., adamw_v_...]
+  state_.clear();
+  state_.reserve(3 * params.size());
+  for (auto& m : muon_mom_) state_.push_back(m);
+  for (auto& m : adamw_m_) state_.push_back(m);
+  for (auto& v : adamw_v_) state_.push_back(v);
+
   initialized_ = true;
 }
 
@@ -115,5 +122,72 @@ std::vector<array> Optimizer::step(const std::vector<array>& params,
     }
   }
 
+  return out;
+}
+
+// Pure functional version for compile().
+// state layout: [muon_mom[0..N-1], adamw_m[0..N-1], adamw_v[0..N-1]]
+// Returns: [new_params[0..N-1], new_muon_mom[0..N-1], new_adamw_m[0..N-1], new_adamw_v[0..N-1]]
+std::vector<array> Optimizer::step_compiled(
+    const std::vector<array>& params,
+    const std::vector<array>& grads,
+    const std::vector<array>& state,
+    const std::vector<array>& bc,
+    const std::vector<array>& lr_arr) {
+  size_t N = params.size();
+  float momentum = 0.95f;
+  // Extract float values (CPU sync on scalar arrays — cheap, and avoids array op overhead)
+  float inv_bc1_f = bc[0].item<float>();
+  float inv_bc2_f = bc[1].item<float>();
+  float lr_f = lr_arr[0].item<float>();
+  float adamw_lr_f = lr_arr[1].item<float>();
+  float wd_muon_f = lr_arr[2].item<float>();
+  float wd_adamw_f = lr_arr[3].item<float>();
+
+  std::vector<array> new_params;
+  std::vector<array> new_mom_vec;
+  std::vector<array> new_am_vec;
+  std::vector<array> new_av_vec;
+  new_params.reserve(N);
+  new_mom_vec.reserve(N);
+  new_am_vec.reserve(N);
+  new_av_vec.reserve(N);
+
+  for (size_t i = 0; i < N; i++) {
+    const auto& mom = state[i];
+    const auto& am = state[N + i];
+    const auto& av = state[2 * N + i];
+
+    if (is_muon_[i]) {
+      auto new_mom = mom * array(momentum) + grads[i];
+      auto nesterov = grads[i] + new_mom * array(momentum);
+      auto ortho = newton_schulz5(nesterov, 5);
+      auto shape = params[i].shape();
+      float ratio = std::max(1.0f, (float)shape[0] / (float)shape[1]);
+      float scale_f = lr_f * std::sqrt(ratio);
+      new_params.push_back(params[i] * array(wd_muon_f) - ortho * array(scale_f));
+      new_mom_vec.push_back(new_mom);
+      new_am_vec.push_back(am);
+      new_av_vec.push_back(av);
+    } else {
+      auto new_m = am * array(beta1_) + grads[i] * array(1.0f - beta1_);
+      auto new_v = av * array(beta2_) + square(grads[i]) * array(1.0f - beta2_);
+      auto m_hat = new_m * array(inv_bc1_f);
+      auto v_hat = new_v * array(inv_bc2_f);
+      auto update = m_hat / (sqrt(v_hat) + array(eps_));
+      new_params.push_back(params[i] * array(wd_adamw_f) - update * array(adamw_lr_f));
+      new_mom_vec.push_back(mom);
+      new_am_vec.push_back(new_m);
+      new_av_vec.push_back(new_v);
+    }
+  }
+
+  // Output: [new_params..., new_mom_vec..., new_am_vec..., new_av_vec...]
+  std::vector<array> out;
+  out.reserve(4 * N);
+  for (auto& p : new_params) out.push_back(std::move(p));
+  for (auto& s : new_mom_vec) out.push_back(std::move(s));
+  for (auto& s : new_am_vec) out.push_back(std::move(s));
+  for (auto& s : new_av_vec) out.push_back(std::move(s));
   return out;
 }

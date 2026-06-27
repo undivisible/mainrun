@@ -4,6 +4,7 @@
 #include "inference.h"
 #include <mlx/transforms.h>
 #include <mlx/compile.h>
+#include <mlx/memory.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -137,7 +138,9 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   float best_val = 1e9f;
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  // Training loss + gradient function (NOT compiled — dropout changes graph each step)
+  // Training loss + gradient function.
+  // Mixed precision: cast params to bfloat16 for forward/backward, optimizer stays float32.
+  // MLX compile handles dropout (RNG state threaded through compiled function).
   auto loss_fn = std::function<array(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) {
       size_t np = inputs.size() - 2;
@@ -146,6 +149,40 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
       return model.loss(inputs[np], inputs[np + 1], true);
     });
   auto vg = value_and_grad(loss_fn, argnums);
+
+  auto vg_wrapped = std::function<std::vector<array>(const std::vector<array>&)>(
+    [vg](const std::vector<array>& inputs) -> std::vector<array> {
+      auto [loss, grads] = vg(inputs);
+      // Fuse clip_grad_norm into the compiled graph
+      array total_sq = array(0.0f);
+      for (const auto& g : grads) total_sq = total_sq + sum(square(g));
+      array scale = minimum(array(1.0f), array(1.0f) / sqrt(total_sq));
+      std::vector<array> out = {loss};
+      for (const auto& g : grads) out.push_back(g * scale);
+      return out;
+    });
+  auto compiled_vg = compile(vg_wrapped);
+
+  // Initialize optimizer state (creates momentum buffers)
+  opt.init_state(params);
+
+  // Compiled optimizer step: pass params + grads + state + bc + lr, get new params + new state.
+  // All changing values (lr, bc) are passed as array inputs so the graph is stable.
+  size_t N = params.size();
+  auto opt_fn = std::function<std::vector<array>(const std::vector<array>&)>(
+    [&](const std::vector<array>& inputs) -> std::vector<array> {
+      // inputs = [params(N), grads(N), state(3N), bc(2), lr(4)]
+      size_t state_start = 2 * N;
+      size_t state_end = 2 * N + 3 * N;  // = 5*N
+      std::vector<array> p(inputs.begin(), inputs.begin() + N);
+      std::vector<array> g(inputs.begin() + N, inputs.begin() + 2 * N);
+      std::vector<array> s(inputs.begin() + state_start, inputs.begin() + state_end);
+      std::vector<array> bc = {inputs[state_end], inputs[state_end + 1]};
+      std::vector<array> lr_arr = {inputs[state_end + 2], inputs[state_end + 3],
+                                    inputs[state_end + 4], inputs[state_end + 5]};
+      return opt.step_compiled(p, g, s, bc, lr_arr);
+    });
+  auto compiled_opt = opt_fn;  // compile doesn't help — 74 different-shaped params can't fuse
 
   // Compiled eval function (no dropout → stable graph)
   auto compiled_eval = compile(std::function<std::vector<array>(const std::vector<array>&)>(eval_single_batch_impl));
@@ -166,12 +203,37 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
     inputs.push_back(x);
     inputs.push_back(y);
 
-    auto [loss, grads] = vg(inputs);
+    auto result = compiled_vg(inputs);
+    auto loss = result[0];
+    std::vector<array> grads(result.begin() + 1, result.end());
     eval(loss);
     float train_loss = loss.item<float>();
 
-    grads = clip_grad_norm(grads, 1.0f);
-    params = opt.step(params, grads);
+    // Build optimizer input: [params, grads, state, inv_bc1, inv_bc2, lr, adamw_lr, wd_muon, wd_adamw]
+    int s = step + 1;
+    float bc1 = 1.0f - std::pow(0.9f, s);
+    float bc2 = 1.0f - std::pow(0.95f, s);
+    float adamw_lr = lr * 0.2f;
+    float wd_muon = 1.0f - lr * 0.1f;
+    float wd_adamw = 1.0f - adamw_lr * 0.1f;
+
+    std::vector<array> opt_inputs;
+    opt_inputs.reserve(5 * N + 6);
+    for (auto& p : params) opt_inputs.push_back(p);
+    for (auto& g : grads) opt_inputs.push_back(g);
+    auto& state = const_cast<std::vector<array>&>(opt.state());
+    for (auto& s_arr : state) opt_inputs.push_back(s_arr);
+    opt_inputs.push_back(array(1.0f / bc1));
+    opt_inputs.push_back(array(1.0f / bc2));
+    opt_inputs.push_back(array(lr));
+    opt_inputs.push_back(array(adamw_lr));
+    opt_inputs.push_back(array(wd_muon));
+    opt_inputs.push_back(array(wd_adamw));
+
+    auto opt_out = compiled_opt(opt_inputs);
+    eval(opt_out);
+    params.assign(opt_out.begin(), opt_out.begin() + N);
+    state.assign(opt_out.begin() + N, opt_out.end());
     model.set_parameters(params);
     if (cfg.use_ema) ema.update(params, step);
 

@@ -2,25 +2,37 @@
 #include <mlx/mlx.h>
 #include <vector>
 
-// Muon + AdamW hybrid optimizer.
-// 2D non-embedding params → Muon (momentum + Newton-Schulz orthogonalization).
-// 1D params + embeddings → AdamW.
-// Interface: step(params, grads) → new params. State maintained internally.
 class Optimizer {
 public:
   Optimizer(float lr, float weight_decay, float b1, float b2, float eps);
   void set_learning_rate(float lr);
+  void set_step(int s) { step_ = s; }
   std::vector<mlx::core::array> step(const std::vector<mlx::core::array>& params,
                                      const std::vector<mlx::core::array>& grads);
+
+  // Compiled step: all state passed explicitly as inputs/outputs.
+  // state = [muon_mom_..., adamw_m_..., adamw_v_...]
+  // bc = [bc1, bc2] (bias correction factors, passed as input for compilability)
+  // Returns: [new_params..., new_state...]
+  std::vector<mlx::core::array> step_compiled(
+      const std::vector<mlx::core::array>& params,
+      const std::vector<mlx::core::array>& grads,
+      const std::vector<mlx::core::array>& state,
+      const std::vector<mlx::core::array>& bc,
+      const std::vector<mlx::core::array>& lr_arr);
+
+  const std::vector<mlx::core::array>& state() const { return state_; }
+  bool initialized() const { return initialized_; }
+  void init_state(const std::vector<mlx::core::array>& params) { init(params); }
 
 private:
   float lr_, adamw_lr_, weight_decay_, beta1_, beta2_, eps_;
   int step_ = 0;
-  // Per-param buffers, indexed same as params vector.
-  std::vector<mlx::core::array> muon_mom_;   // momentum buffers for muon params
-  std::vector<mlx::core::array> adamw_m_;    // first moment for adamw params
-  std::vector<mlx::core::array> adamw_v_;    // second moment for adamw params
-  std::vector<bool> is_muon_;                // classification per param
+  std::vector<mlx::core::array> muon_mom_;
+  std::vector<mlx::core::array> adamw_m_;
+  std::vector<mlx::core::array> adamw_v_;
+  std::vector<mlx::core::array> state_;
+  std::vector<bool> is_muon_;
   bool initialized_ = false;
 
   void init(const std::vector<mlx::core::array>& params);

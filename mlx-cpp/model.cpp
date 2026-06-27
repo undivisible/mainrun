@@ -66,9 +66,7 @@ GPT::GPT(const GPTConfig& cfg)
 }
 
 array GPT::rmsnorm(const array& x, const array& w) {
-    auto ms = mean(square(x), -1, true);
-    auto norm = rsqrt(ms + cfg_.rms_eps);
-    return w * norm * x;
+    return fast::rms_norm(x, w, cfg_.rms_eps);
 }
 
 array GPT::rmsnorm_fast(const array& x, const array& w) {
@@ -136,17 +134,15 @@ array GPT::forward(const array& idx, bool train) {
         k = transpose(k, {0, 2, 1, 3});
         v = transpose(v, {0, 2, 1, 3});
 
-        q = apply_rope(q, cos_v, sin_v);
-        k = apply_rope(k, cos_v, sin_v);
+        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
+        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
 
         if (cfg_.qk_norm) {
             q = rmsnorm(q, b.q_norm_w);
             k = rmsnorm(k, b.k_norm_w);
         }
 
-        auto attn_out = train
-            ? [&] { auto scores = matmul(q, transpose(k, {0, 1, 3, 2})) * attn_scale + mask; auto weights = dropout_(softmax(scores, -1)); return matmul(weights, v); }()
-            : fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
+        auto attn_out = fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
 
         attn_out = transpose(attn_out, {0, 2, 1, 3});
         attn_out = reshape(attn_out, {B * T, cfg_.d_model});
