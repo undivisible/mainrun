@@ -19,11 +19,6 @@ tasks:
     cmds:
       - python3 train.py
 
-  train-burn:
-    dir: burn
-    cmds:
-      - echo "Burn trainer WIP — see burn/README.md"
-
   submit:
     deps: [checkpoint]
     dir: scripts

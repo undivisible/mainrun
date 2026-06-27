@@ -11,6 +11,12 @@ venv/
 .env
 
 mainrun*.log
+logs/
+checkpoints/
+experiment_results/
+experiment_plan.md
+README_EXPERIMENTS.md
+mainrun/report.md
 
 node_modules/
 
