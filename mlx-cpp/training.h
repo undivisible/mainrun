@@ -7,7 +7,7 @@
 enum class LrSchedule { WSD, Cosine };
 
 struct TrainConfig {
-  int max_steps = 945;
+  int max_steps = 889;
   int batch_size = 32;
   int block_size = 256;
   int eval_interval = 45;
@@ -31,7 +31,7 @@ struct TrainConfig {
   int warmup_steps = 50;      // for cosine (override warmup_pct)
 };
 
-constexpr float BASELINE = 1.081186f;
+constexpr float BASELINE = 1.115752f;
 
 // WSD lambda schedule: warmup -> constant -> linear decay to 0.
 float wsd_lr(int step, int max_steps, float max_lr, float warmup_pct, float decay_pct);

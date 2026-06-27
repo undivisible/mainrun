@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
       if (i + 1 < argc) return argv[++i];
       return def;
     };
-    if (a == "--max-steps") cfg.max_steps = std::stoi(next("945"));
+    if (a == "--max-steps") cfg.max_steps = std::stoi(next("889"));
     else if (a == "--max-lr") cfg.max_lr = std::stof(next("0.02"));
     else if (a == "--warmup-pct") cfg.warmup_pct = std::stof(next("0.05"));
     else if (a == "--decay-pct") cfg.decay_pct = std::stof(next("0.20"));
@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
              "  v14      Adaptive dropout (0.10)\n"
              "  infer    Load checkpoint, generate text\n"
              "Options:\n"
-             "  --max-steps N      (default 945)\n"
+             "  --max-steps N      (default 889)\n"
              "  --max-lr F         (default 0.02)\n"
              "  --warmup-pct F     (default 0.05)\n"
              "  --decay-pct F      (default 0.20)\n"
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   DataLoader data(data_path, tok_path, cfg.batch_size, cfg.block_size);
 
   auto run_exp = [&](TrainConfig c) {
-    if (cfg.max_steps != 945) { c.max_steps = cfg.max_steps; c.eval_interval = cfg.eval_interval; }
+    if (cfg.max_steps != 889) { c.max_steps = cfg.max_steps; c.eval_interval = cfg.eval_interval; }
     return run_training(data, c);
   };
 

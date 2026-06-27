@@ -31,14 +31,14 @@ run_exp() {
   echo ""
 }
 
-# Individual experiments (945 steps each, ~12 min)
-run_exp "baseline"    train --max-steps 945 --eval-interval 45
-run_exp "v9_cosine"   v9 --max-steps 945 --eval-interval 45
-run_exp "v10_wider"   v10 --max-steps 945 --eval-interval 45
-run_exp "v11_deeper"  v11 --max-steps 945 --eval-interval 45
-run_exp "v12_low_dropout" v12 --max-steps 945 --eval-interval 45
-run_exp "v13_token_aug"   v13 --max-steps 945 --eval-interval 45
-run_exp "v14_adaptive_dropout" v14 --max-steps 945 --eval-interval 45
+# Individual experiments (889 steps each, ~12 min)
+run_exp "baseline"    train --max-steps 889 --eval-interval 45
+run_exp "v9_cosine"   v9 --max-steps 889 --eval-interval 45
+run_exp "v10_wider"   v10 --max-steps 889 --eval-interval 45
+run_exp "v11_deeper"  v11 --max-steps 889 --eval-interval 45
+run_exp "v12_low_dropout" v12 --max-steps 889 --eval-interval 45
+run_exp "v13_token_aug"   v13 --max-steps 889 --eval-interval 45
+run_exp "v14_adaptive_dropout" v14 --max-steps 889 --eval-interval 45
 
 # Summary
 echo ""
