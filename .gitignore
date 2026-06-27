@@ -21,3 +21,4 @@ node_modules/
 Thumbs.db
 
 mlx-cpp/build/
+mlx-cpp/checkpoint.safetensors

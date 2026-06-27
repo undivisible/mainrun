@@ -150,8 +150,10 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
     });
   auto vg = value_and_grad(loss_fn, argnums);
 
+  size_t N = params.size();
+
   auto vg_wrapped = std::function<std::vector<array>(const std::vector<array>&)>(
-    [vg](const std::vector<array>& inputs) -> std::vector<array> {
+    [vg, N](const std::vector<array>& inputs) -> std::vector<array> {
       auto [loss, grads] = vg(inputs);
       // Fuse clip_grad_norm into the compiled graph
       array total_sq = array(0.0f);
@@ -163,17 +165,11 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
     });
   auto compiled_vg = compile(vg_wrapped);
 
-  // Initialize optimizer state (creates momentum buffers)
-  opt.init_state(params);
-
   // Compiled optimizer step: pass params + grads + state + bc + lr, get new params + new state.
-  // All changing values (lr, bc) are passed as array inputs so the graph is stable.
-  size_t N = params.size();
   auto opt_fn = std::function<std::vector<array>(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) -> std::vector<array> {
-      // inputs = [params(N), grads(N), state(3N), bc(2), lr(4)]
       size_t state_start = 2 * N;
-      size_t state_end = 2 * N + 3 * N;  // = 5*N
+      size_t state_end = 2 * N + 3 * N;
       std::vector<array> p(inputs.begin(), inputs.begin() + N);
       std::vector<array> g(inputs.begin() + N, inputs.begin() + 2 * N);
       std::vector<array> s(inputs.begin() + state_start, inputs.begin() + state_end);
@@ -182,7 +178,10 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
                                     inputs[state_end + 4], inputs[state_end + 5]};
       return opt.step_compiled(p, g, s, bc, lr_arr);
     });
-  auto compiled_opt = opt_fn;  // compile doesn't help — 74 different-shaped params can't fuse
+  auto compiled_opt = opt_fn;  // compile doesn't help — 74 different-shaped params
+
+  // Initialize optimizer state
+  opt.init_state(params);
 
   // Compiled eval function (no dropout → stable graph)
   auto compiled_eval = compile(std::function<std::vector<array>(const std::vector<array>&)>(eval_single_batch_impl));
@@ -205,11 +204,11 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
 
     auto result = compiled_vg(inputs);
     auto loss = result[0];
-    std::vector<array> grads(result.begin() + 1, result.end());
     eval(loss);
     float train_loss = loss.item<float>();
-
-    // Build optimizer input: [params, grads, state, inv_bc1, inv_bc2, lr, adamw_lr, wd_muon, wd_adamw]
+    std::vector<array> grads(result.begin() + 1, result.end());
+    // Muon + AdamW optimizer step (functional, with compiled vg)
+    // Build optimizer input: [params, grads, state, bc, lr]
     int s = step + 1;
     float bc1 = 1.0f - std::pow(0.9f, s);
     float bc2 = 1.0f - std::pow(0.95f, s);

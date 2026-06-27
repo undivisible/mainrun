@@ -136,7 +136,6 @@ std::vector<array> Optimizer::step_compiled(
     const std::vector<array>& lr_arr) {
   size_t N = params.size();
   float momentum = 0.95f;
-  // Extract float values (CPU sync on scalar arrays — cheap, and avoids array op overhead)
   float inv_bc1_f = bc[0].item<float>();
   float inv_bc2_f = bc[1].item<float>();
   float lr_f = lr_arr[0].item<float>();
