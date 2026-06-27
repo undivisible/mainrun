@@ -33,8 +33,8 @@ static std::string parse_string(const std::string& s, const std::string& name, s
 
 // ponytail: subcommand + flag parsing, no cxxopts.
 int main(int argc, char** argv) {
-  std::string data_path = "../tokenized_data_24k.json";
-  std::string tok_path = "../tokenizer_24k.json";
+  std::string data_path = "../data/tokenized_data_24k.json";
+  std::string tok_path = "../data/tokenizer_24k.json";
   std::string subcommand = "train";
 
   int i = 1;
@@ -87,8 +87,8 @@ int main(int argc, char** argv) {
              "  --decay-pct F      (default 0.20)\n"
              "  --eval-interval N  (default 45)\n"
              "  --quick            (90 steps, for testing)\n"
-             "  --data PATH        (default ../tokenized_data_24k.json)\n"
-             "  --tokenizer PATH   (default ../tokenizer_24k.json)\n"
+             "  --data PATH        (default ../data/tokenized_data_24k.json)\n"
+             "  --tokenizer PATH   (default ../data/tokenizer_24k.json)\n"
              "  --no-ema\n"
              "  --checkpoint PATH  (for infer)\n"
              "  --prompt STR       (for infer)\n"

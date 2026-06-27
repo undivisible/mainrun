@@ -3,7 +3,7 @@ import mlx.nn as nn
 import mlx.utils
 import time, json, math
 
-with open('tokenized_data_24k.json') as f:
+with open('../data/tokenized_data_24k.json') as f:
     d = json.load(f)
 train_ids = mx.array(d['train_ids'], dtype=mx.uint32)
 

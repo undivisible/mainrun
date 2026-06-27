@@ -2,7 +2,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import time, json, sys
 
-with open('tokenized_data_24k.json') as f:
+with open('../data/tokenized_data_24k.json') as f:
     d = json.load(f)
 
 vocab_size, n_layer, n_head, d_model = 24000, 8, 9, 576

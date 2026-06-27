@@ -86,13 +86,13 @@ cd mlx-cpp
   --prompt "The future of AI is" --max-tokens 300 --benchmark --quantize
 
 # Python training
-python3 benchmark_mlx_py.py
+python3 benchmarks/benchmark_mlx_py.py
 
 # Python inference
-python3 benchmark_infer_mlx.py
+python3 benchmarks/benchmark_infer_mlx.py
 
 # Forward-only microbenchmark
-python3 benchmark_forward_py.py
+python3 benchmarks/benchmark_forward_py.py
 ./build/bench_forward
 ```
 
