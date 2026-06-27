@@ -1,6 +1,8 @@
 # Speed Benchmarks: C++ MLX Engine vs Python MLX
 
-Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-style model:
+**Hardware:** MacBook Pro 14-inch (M5 Pro, 2026) — 5+10 core CPU @ 4.61 GHz, 16-core GPU @ 1.62 GHz, 48 GB unified memory
+
+Benchmarks run on the same machine with the same GPT-style model:
 
 - 8 layers, 9 heads, d_model 576, head_dim 64
 - SwiGLU MLP (hidden ~1536), 24k vocab
