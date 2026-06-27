@@ -130,13 +130,13 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   size_t N = params.size();
 
   // --- Approach: compile the entire training step (vg + optimizer) in one graph ---
-  // Matches Python mlx-lm pattern. vg is captured from outside; optimizer is inline.
+  // Pure functional loss: parameters are explicit inputs, no model state mutation.
+  // This makes the graph transparent to value_and_grad/compile.
   auto loss_fn = std::function<array(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) {
       size_t np = inputs.size() - 2;
       std::vector<array> p(inputs.begin(), inputs.begin() + np);
-      model.set_parameters(p);
-      return model.loss(inputs[np], inputs[np + 1], true);  // dropout during training
+      return model.loss_functional(p, inputs[np], inputs[np + 1], true);
     });
   auto vg = value_and_grad(loss_fn, argnums);
 
@@ -181,7 +181,8 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
         if (opt.is_muon_param(i)) {
           auto mom_update = s[i] * momentum_a + grads[i];
           auto nesterov = grads[i] + mom_update * momentum_a;
-          auto ortho = opt.newton_schulz5(nesterov, 5);
+          // Three Newton-Schulz iterations balance optimizer quality and graph cost.
+          auto ortho = opt.newton_schulz5(nesterov, 3);
           auto shape = p[i].shape();
           float ratio = std::max(1.0f, (float)shape[0] / (float)shape[1]);
           auto scale = lr_a * array(std::sqrt(ratio));
@@ -286,4 +287,3 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   save_checkpoint("checkpoint.safetensors", model);
   return best_val;
 }
-
