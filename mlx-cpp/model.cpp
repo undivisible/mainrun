@@ -145,9 +145,7 @@ array GPT::forward(const array& idx, bool train) {
         auto up_flat = matmul(m_flat, transpose(b.w_up, {1, 0}));
         auto gate = reshape(gate_flat, {B, T, hidden_});
         auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = train
-            ? multiply(multiply(gate, sigmoid(gate)), up)
-            : compiled_swiglu({gate, up})[0];
+        auto silu_result = compiled_swiglu({gate, up})[0];
         auto combined_flat = reshape(silu_result, {B * T, hidden_});
         auto mlp_out_flat = matmul(combined_flat, transpose(b.w_out, {1, 0}));
         auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
@@ -235,9 +233,7 @@ array GPT::forward_functional(const std::vector<array>& params, const array& idx
         auto up_flat = matmul(m_flat, transpose(w_up, {1, 0}));
         auto gate = reshape(gate_flat, {B, T, hidden_});
         auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = train
-            ? multiply(multiply(gate, sigmoid(gate)), up)
-            : compiled_swiglu({gate, up})[0];
+        auto silu_result = compiled_swiglu({gate, up})[0];
         auto combined_flat = reshape(silu_result, {B * T, hidden_});
         auto mlp_out_flat = matmul(combined_flat, transpose(w_out, {1, 0}));
         auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});

@@ -12,7 +12,7 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 
 | Workload | Python MLX | C++ MLX | Winner |
 |----------|-------------|---------|--------|
-| Training (Muon+AdamW, 3 NS iters) | 694 ms/step | 453 ms/step | C++ 1.5x faster |
+| Training (Muon+AdamW, 3 NS iters) | 694 ms/step | 436 ms/step | C++ 1.6x faster |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | C++ ~8% faster |
 | Inference decode (KV cache, fp32) | 365 tok/s* | 1270 tok/s | C++ 3.5x faster |
 | Inference decode (KV cache, 4-bit) | — | 1900 tok/s | C++ only |
@@ -30,7 +30,7 @@ We measured the full training step with equivalent logic in both engines:
 
 **Results (single clean run, after cooldown):**
 - **Python MLX:** 694 ms/step
-- **C++ MLX:** 453 ms/step
+- **C++ MLX:** 436 ms/step
 
 Both use the same Muon+AdamW optimizer with 3 Newton-Schulz iterations and `mx.compile`/`mlx::core::compile`. The C++ engine wins because the fused training step compiles forward + backward + clip + optimizer into a single graph, and the optimizer update is inlined as array operations rather than running through Python loops.
 
@@ -53,7 +53,7 @@ The C++ inference engine is faster because it:
 ## Optimizations implemented
 
 - **Inference engine** (`mlx-cpp/inference/`): checkpoint load, tokenizer via Python helper, KV cache, GPU sampling, optional 4-bit quantization.
-- **Compiled SwiGLU** (`mlx-cpp/model.cpp`): gate * sigmoid(gate) * up fused into one kernel.
+- **Compiled SwiGLU** (`mlx-cpp/model.cpp`): gate * sigmoid(gate) * up fused into one kernel, used for both training and inference.
 - **Fast kernels**: `fast::rope`, `fast::rms_norm`, `fast::scaled_dot_product_attention`, `quantized_matmul`.
 - **Avoid CPU sync in decode loop**: `forward_decode_growing` takes `int prev_len` instead of an array, removing a per-step GPU→CPU sync.
 - **GPU-only decode loop**: benchmark keeps argmax on GPU across steps, feeds directly to next forward pass, syncs only every 128 steps. Eliminates CPU-GPU round-trip per token.
@@ -66,6 +66,7 @@ The C++ inference engine is faster because it:
 - **Compiled decode with pre-allocated KV cache**: shape instability from `fast::rope` with array offsets and `split` shape inference failed. Reverted.
 - **Compiled growing-cache decode**: `split` and `slice` cannot infer output shapes with `shapeless=true` compile. Reverted.
 - **Stable cache for quantized**: scatter+slice path avoids O(N²) concatenate but was slower at 200 tokens (1150 vs 1273 tok/s) due to scatter overhead. Compiled mask-based path was also slower (1108 tok/s) due to attending over full block_size. Reverted.
+- **slice_update instead of concatenate**: pre-allocated cache with slice_update was slower than growing concatenate at both 200 tokens (1600 vs 1900 tok/s) and 500 tokens (535 vs 555 tok/s). The slice + copy overhead outweighs concatenate savings. Reverted.
 - **Float16 inference**: `float16` weights/activations and cache were slower than `bfloat16` (likely due to recompilation overhead). Reverted.
 - **Fused full training step**: marginal gains only; Python still wins.
 
