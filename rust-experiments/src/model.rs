@@ -528,6 +528,14 @@ pub fn create_gpt_model(config: GPTConfig, device: &candle_core::Device) -> Resu
         let shape = var.as_tensor().dims();
         let n_elems: usize = shape.iter().product();
 
+        // RMSNorm weights: init to 1.0 (not N(0, 0.02))
+        if name.contains("norm") || name.contains("ln_f") {
+            let ones = vec![1.0f32; n_elems];
+            let init_tensor = Tensor::from_vec(ones, shape, device)?;
+            var.set(&init_tensor)?;
+            continue;
+        }
+
         // Scaled init for proj and w_out: std / sqrt(2 * n_layer)
         let scaled_std = if name.contains("attn.proj.weight") || name.contains("mlp.w_out.weight") {
             std / (2.0 * n_layer).sqrt()
@@ -539,7 +547,6 @@ pub fn create_gpt_model(config: GPTConfig, device: &candle_core::Device) -> Resu
         let init_data: Vec<f32> = (0..n_elems)
             .map(|_| {
                 let v = normal.sample(&mut rng);
-                // Clamp to avoid inf/NaN
                 if v.is_finite() { v } else { 0.0 }
             })
             .collect();

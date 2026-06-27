@@ -96,6 +96,9 @@ impl RealTrainer {
 
         let vars: Vec<(String, candle_core::Var)> = {
             let data = varmap.data().lock().unwrap();
+            for (name, var) in data.iter() {
+                println!("  VAR: {} rank={} shape={:?}", name, var.as_tensor().rank(), var.as_tensor().dims());
+            }
             data.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         println!("Number of trainable variables: {}", vars.len());
