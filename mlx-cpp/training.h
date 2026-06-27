@@ -31,7 +31,7 @@ struct TrainConfig {
   int warmup_steps = 50;      // for cosine (override warmup_pct)
 };
 
-constexpr float BASELINE = 0.974555f;
+constexpr float BASELINE = 1.081186f;
 
 // WSD lambda schedule: warmup -> constant -> linear decay to 0.
 float wsd_lr(int step, int max_steps, float max_lr, float warmup_pct, float decay_pct);
