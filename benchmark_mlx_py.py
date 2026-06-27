@@ -115,6 +115,7 @@ loss_and_grad = nn.value_and_grad(model, loss_fn)
 def step_fn(idx, targets):
     global step_n, muon_mom, adamw_m, adamw_v
     loss, grads_tree = loss_and_grad(model, idx, targets)
+    flat_params = mlx.utils.tree_flatten(model.parameters())
     flat_grads = mlx.utils.tree_flatten(grads_tree)
     step_n += 1
     bc1 = 1.0 - beta1 ** step_n
@@ -124,7 +125,7 @@ def step_fn(idx, targets):
         if is_muon[i]:
             muon_mom[i] = muon_mom[i] * momentum + g
             nesterov = g + muon_mom[i] * momentum
-            ortho = newton_schulz5(nesterov, 5)
+            ortho = newton_schulz5(nesterov, 3)
             rows, cols = p.shape
             ratio = max(1.0, rows / cols)
             scale = lr * math.sqrt(ratio)
@@ -139,14 +140,13 @@ def step_fn(idx, targets):
             wd_scale = 1.0 - adamw_lr * weight_decay
             new_p = p * wd_scale - update * adamw_lr
         new_params.append(new_p)
-    # Update model in place
     keys = [k for k, _ in flat_params]
     new_tree = mlx.utils.tree_unflatten(list(zip(keys, new_params)))
     model.update(new_tree)
-    flat_params[:] = list(zip(keys, new_params))
     return loss
 
-step_c = mx.compile(step_fn)
+state = [model.state, muon_mom, adamw_m, adamw_v]
+step_c = mx.compile(step_fn, inputs=state, outputs=state)
 ptr = 0
 span = block_size * batch_size + 1
 for _ in range(5):

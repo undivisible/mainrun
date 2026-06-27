@@ -33,12 +33,6 @@ float wsd_lr(int step, int max_steps, float max_lr, float warmup_pct, float deca
   return max_lr * std::max(0.0f, 1.0f - (float)(step - decay_start + 1) / decay_len);
 }
 
-float cosine_lr(int step, int max_steps, float max_lr, float min_lr, int warmup_steps) {
-  if (step < warmup_steps) return max_lr * (float)(step + 1) / warmup_steps;
-  float progress = (float)(step - warmup_steps) / (max_steps - warmup_steps);
-  return min_lr + 0.5f * (max_lr - min_lr) * (1.0f + std::cos(M_PI * progress));
-}
-
 // EMA shadow params with warmup decay: min(target, (1+step)/(10+step))
 struct ModelEMA {
   std::vector<array> shadow;
@@ -118,7 +112,7 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   for (auto* p : model.parameters()) params.push_back(*p);
   fprintf(stderr, "param tensors: %zu\n", params.size());
 
-  Optimizer opt(cfg.max_lr, cfg.weight_decay, cfg.beta1, cfg.beta2, cfg.eps);
+  Optimizer opt(cfg.max_lr);
   ModelEMA ema(params, cfg.ema_target_decay);
 
   std::vector<int> argnums(params.size());
@@ -219,11 +213,7 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   int loss_count = 0;
 
   for (int step = 0; step < cfg.max_steps; step++) {
-    float lr;
-    if (cfg.lr_schedule == LrSchedule::Cosine)
-      lr = cosine_lr(step, cfg.max_steps, cfg.max_lr, cfg.min_lr, cfg.warmup_steps);
-    else
-      lr = wsd_lr(step, cfg.max_steps, cfg.max_lr, cfg.warmup_pct, cfg.decay_pct);
+    float lr = wsd_lr(step, cfg.max_steps, cfg.max_lr, cfg.warmup_pct, cfg.decay_pct);
     opt.set_learning_rate(lr);
 
     auto [x, y] = data.get_train_batch();

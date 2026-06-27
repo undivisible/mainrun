@@ -2,6 +2,7 @@
 
 #include <mlx/mlx.h>
 #include <mlx/fast.h>
+#include <functional>
 #include <random>
 #include <utility>
 #include <vector>
@@ -27,9 +28,25 @@ public:
     mlx::core::array forward(const mlx::core::array& idx, bool train);
     mlx::core::array loss(const mlx::core::array& idx, const mlx::core::array& targets, bool train);
 
+    mlx::core::array forward_functional(const std::vector<mlx::core::array>& params,
+                                        const mlx::core::array& idx, bool train) const;
+    mlx::core::array loss_functional(const std::vector<mlx::core::array>& params,
+                                     const mlx::core::array& idx,
+                                     const mlx::core::array& targets, bool train) const;
+
     mlx::core::array forward_cached(const mlx::core::array& idx,
-                                    std::vector<std::pair<mlx::core::array, mlx::core::array>>& kv_cache,
+                                    mlx::core::array& k_cache,
+                                    mlx::core::array& v_cache,
                                     int prev_len);
+
+    // Convert parameters to a smaller dtype for inference (bfloat16 by default).
+    void promote_for_inference(mlx::core::Dtype dtype = mlx::core::bfloat16);
+
+    // Decode with a growing per-layer KV cache (used for quantized path).
+    mlx::core::array forward_decode_growing(
+        const mlx::core::array& idx,
+        std::vector<std::pair<mlx::core::array, mlx::core::array>>& kv_cache,
+        const mlx::core::array& prev_len);
 
     std::vector<mlx::core::array*> parameters();
     void set_parameters(const std::vector<mlx::core::array>& params);
@@ -92,12 +109,19 @@ private:
     std::vector<QuantW> q_out_;
     QuantW q_emb_;
 
+    mlx::core::Dtype infer_dtype_ = mlx::core::float32;
+    mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)> compiled_decode_fp32_;
+    mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)> compiled_decode_q_;
+
     static std::vector<Block> make_blocks(std::mt19937& gen, const GPTConfig& cfg, int hd, int hidden);
     void init_rope_cache();
 
-    mlx::core::array rmsnorm(const mlx::core::array& x, const mlx::core::array& w);
-    mlx::core::array dropout_(const mlx::core::array& x);
-    mlx::core::array make_mask(const mlx::core::array& idx);
+    // One decode step (T=1) with pre-allocated stable KV cache.
+    std::vector<mlx::core::array> decode_step_impl(const std::vector<mlx::core::array>& inputs);
+
+    mlx::core::array rmsnorm(const mlx::core::array& x, const mlx::core::array& w) const;
+    mlx::core::array dropout_(const mlx::core::array& x) const;
+    mlx::core::array make_mask(const mlx::core::array& idx) const;
 
     // Quantized matmul helper: x @ w.T using quantized weights
     mlx::core::array qmatmul(const mlx::core::array& x, const QuantW& qw);

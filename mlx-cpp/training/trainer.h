@@ -4,8 +4,6 @@
 #include <string>
 #include "data.h"
 
-enum class LrSchedule { WSD, Cosine };
-
 struct TrainConfig {
   int max_steps = 889;
   int batch_size = 32;
@@ -26,18 +24,12 @@ struct TrainConfig {
   float dropout = 0.15f;
   bool qk_norm = true;
   float rope_theta = 1000.0f;
-  LrSchedule lr_schedule = LrSchedule::WSD;
-  float min_lr = 0.001f;      // for cosine
-  int warmup_steps = 50;      // for cosine (override warmup_pct)
 };
 
 constexpr float BASELINE = 1.115752f;
 
 // WSD lambda schedule: warmup -> constant -> linear decay to 0.
 float wsd_lr(int step, int max_steps, float max_lr, float warmup_pct, float decay_pct);
-
-// Cosine schedule with linear warmup.
-float cosine_lr(int step, int max_steps, float max_lr, float min_lr, int warmup_steps);
 
 float run_training(DataLoader& data, const TrainConfig& cfg);
 

@@ -34,7 +34,11 @@ public:
 
     std::string generate(const std::string& prompt, int max_tokens, const SamplingConfig& sampling);
     BenchmarkResult benchmark(const std::string& prompt, int max_tokens, const SamplingConfig& sampling);
-    void quantize() { model_.quantize_for_inference(); }
+    void quantize() {
+        // Quantize in float32 for best quantized-matmul throughput.
+        model_.promote_for_inference(mlx::core::float32);
+        model_.quantize_for_inference();
+    }
 
 private:
     GPT model_;

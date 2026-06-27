@@ -5,6 +5,32 @@
 #include <cstdio>
 #include <string>
 
+static int parse_int(const std::string& s, const std::string& name, int lo, int hi) {
+  try {
+    int v = std::stoi(s);
+    if (v < lo || v > hi) throw std::runtime_error(name + " out of range");
+    return v;
+  } catch (const std::exception& e) {
+    throw std::runtime_error(name + ": invalid value '" + s + "' (" + e.what() + ")");
+  }
+}
+
+static float parse_float(const std::string& s, const std::string& name, float lo, float hi) {
+  try {
+    float v = std::stof(s);
+    if (v < lo || v > hi) throw std::runtime_error(name + " out of range");
+    return v;
+  } catch (const std::exception& e) {
+    throw std::runtime_error(name + ": invalid value '" + s + "' (" + e.what() + ")");
+  }
+}
+
+static std::string parse_string(const std::string& s, const std::string& name, size_t max_len) {
+  if (s.size() > max_len) throw std::runtime_error(name + ": value too long");
+  if (s.find('\0') != std::string::npos) throw std::runtime_error(name + ": contains null byte");
+  return s;
+}
+
 // ponytail: subcommand + flag parsing, no cxxopts.
 int main(int argc, char** argv) {
   std::string data_path = "../tokenized_data_24k.json";
@@ -12,7 +38,7 @@ int main(int argc, char** argv) {
   std::string subcommand = "train";
 
   int i = 1;
-  if (argc > 1 && argv[1][0] != '-') {
+  if (argc > 1 && argv[1] != nullptr && argv[1][0] != '-') {
     subcommand = argv[1];
     i = 2;
   }
@@ -25,30 +51,31 @@ int main(int argc, char** argv) {
   bool do_benchmark = false;
   bool use_quantization = false;
 
-  for (; i < argc; i++) {
-    std::string a = argv[i];
-    auto next = [&](const std::string& def) -> std::string {
-      if (i + 1 < argc) return argv[++i];
-      return def;
-    };
-    if (a == "--max-steps") cfg.max_steps = std::stoi(next("889"));
-    else if (a == "--max-lr") cfg.max_lr = std::stof(next("0.02"));
-    else if (a == "--warmup-pct") cfg.warmup_pct = std::stof(next("0.05"));
-    else if (a == "--decay-pct") cfg.decay_pct = std::stof(next("0.20"));
-    else if (a == "--eval-interval") cfg.eval_interval = std::stoi(next("45"));
-    else if (a == "--batch-size") cfg.batch_size = std::stoi(next("32"));
-    else if (a == "--block-size") cfg.block_size = std::stoi(next("256"));
-    else if (a == "--data") data_path = next(data_path);
-    else if (a == "--tokenizer") tok_path = next(tok_path);
-    else if (a == "--no-ema") cfg.use_ema = false;
-    else if (a == "--quick") { cfg.max_steps = 90; cfg.eval_interval = 15; }
-    else if (a == "--checkpoint") checkpoint = next(checkpoint);
-    else if (a == "--prompt") prompt = next(prompt);
-    else if (a == "--max-tokens") max_tokens = std::stoi(next("100"));
-    else if (a == "--temperature") temperature = std::stof(next("0.8"));
-    else if (a == "--benchmark") do_benchmark = true;
-    else if (a == "--quantize") use_quantization = true;
-    else if (a == "--help" || a == "-h") {
+  try {
+    for (; i < argc; i++) {
+      std::string a = argv[i];
+      auto next = [&](const std::string& def) -> std::string {
+        if (i + 1 < argc) return argv[++i];
+        return def;
+      };
+      if (a == "--max-steps") cfg.max_steps = parse_int(next("889"), "--max-steps", 1, 1000000);
+      else if (a == "--max-lr") cfg.max_lr = parse_float(next("0.02"), "--max-lr", 0.0f, 1.0f);
+      else if (a == "--warmup-pct") cfg.warmup_pct = parse_float(next("0.05"), "--warmup-pct", 0.0f, 1.0f);
+      else if (a == "--decay-pct") cfg.decay_pct = parse_float(next("0.20"), "--decay-pct", 0.0f, 1.0f);
+      else if (a == "--eval-interval") cfg.eval_interval = parse_int(next("45"), "--eval-interval", 1, 1000000);
+      else if (a == "--batch-size") cfg.batch_size = parse_int(next("32"), "--batch-size", 1, 4096);
+      else if (a == "--block-size") cfg.block_size = parse_int(next("256"), "--block-size", 1, 4096);
+      else if (a == "--data") data_path = parse_string(next(data_path), "--data", 4096);
+      else if (a == "--tokenizer") tok_path = parse_string(next(tok_path), "--tokenizer", 4096);
+      else if (a == "--no-ema") cfg.use_ema = false;
+      else if (a == "--quick") { cfg.max_steps = 90; cfg.eval_interval = 15; }
+      else if (a == "--checkpoint") checkpoint = parse_string(next(checkpoint), "--checkpoint", 4096);
+      else if (a == "--prompt") prompt = parse_string(next(prompt), "--prompt", 10000);
+      else if (a == "--max-tokens") max_tokens = parse_int(next("100"), "--max-tokens", 1, 1000000);
+      else if (a == "--temperature") temperature = parse_float(next("0.8"), "--temperature", 0.0f, 2.0f);
+      else if (a == "--benchmark") do_benchmark = true;
+      else if (a == "--quantize") use_quantization = true;
+      else if (a == "--help" || a == "-h") {
       printf("Usage: %s [subcommand] [options]\n"
              "Subcommands:\n"
              "  train    (default) WSD+Muon+EMA training\n"
@@ -75,6 +102,10 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "error: %s\n", e.what());
+    return 1;
+  }
 
   if (subcommand == "infer") {
     GPTConfig mc;
@@ -97,13 +128,6 @@ int main(int argc, char** argv) {
   }
 
   DataLoader data(data_path, tok_path, cfg.batch_size, cfg.block_size);
-
-  if (subcommand == "all" || subcommand == "v9" || subcommand == "v10" ||
-      subcommand == "v11" || subcommand == "v12" || subcommand == "v13" ||
-      subcommand == "v14") {
-    fprintf(stderr, "experiments v9-v14 removed for postfinal; use 'train'\n");
-    return 1;
-  }
 
   float best = run_training(data, cfg);
   printf("Best val: %.6f (baseline: %.6f)\n", best, BASELINE);

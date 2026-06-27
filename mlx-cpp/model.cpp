@@ -65,18 +65,18 @@ GPT::GPT(const GPTConfig& cfg)
     init_rope_cache();
 }
 
-array GPT::rmsnorm(const array& x, const array& w) {
+array GPT::rmsnorm(const array& x, const array& w) const {
     return fast::rms_norm(x, w, cfg_.rms_eps);
 }
 
-array GPT::dropout_(const array& x) {
+array GPT::dropout_(const array& x) const {
     if (cfg_.dropout <= 0.0f) return x;
     auto mask = random::bernoulli(1.0f - cfg_.dropout, x.shape());
     float scale = 1.0f / (1.0f - cfg_.dropout);
     return x * where(mask, array(scale), array(0.0f));
 }
 
-array GPT::make_mask(const array& idx) {
+array GPT::make_mask(const array& idx) const {
     int T = idx.shape(-1);
     auto eos = equal(idx, array(cfg_.eos_id));
     auto eos_f = astype(eos, float32);
@@ -172,6 +172,97 @@ array GPT::loss(const array& idx, const array& targets, bool train) {
     return -mean(picked);
 }
 
+array GPT::forward_functional(const std::vector<array>& params, const array& idx, bool train) const {
+    int B = idx.shape(0);
+    int T = idx.shape(1);
+
+    size_t pi = 0;
+    const array& token_emb = params[pi++];
+
+    auto x = take(token_emb, idx, 0);
+    if (train) x = dropout_(x);
+
+    auto cos_v = slice(rope_cos_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
+    auto sin_v = slice(rope_sin_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
+    auto mask = make_mask(idx);
+
+    float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
+
+    for (size_t li = 0; li < blocks_.size(); li++) {
+        const array& attn_norm_w = params[pi++];
+        const array& qkv_w = params[pi++];
+        const array& q_norm_w = params[pi++];
+        const array& k_norm_w = params[pi++];
+        const array& proj_w = params[pi++];
+        const array& mlp_norm_w = params[pi++];
+        const array& w_gate = params[pi++];
+        const array& w_up = params[pi++];
+        const array& w_out = params[pi++];
+
+        auto h = rmsnorm(x, attn_norm_w);
+
+        auto h_flat = reshape(h, {B * T, cfg_.d_model});
+        auto qkv_flat = matmul(h_flat, transpose(qkv_w, {1, 0}));
+        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
+        auto qkv_parts = split(qkv, 3, -1);
+        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
+        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
+        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
+
+        q = transpose(q, {0, 2, 1, 3});
+        k = transpose(k, {0, 2, 1, 3});
+        v = transpose(v, {0, 2, 1, 3});
+
+        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
+        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
+
+        if (cfg_.qk_norm) {
+            q = rmsnorm(q, q_norm_w);
+            k = rmsnorm(k, k_norm_w);
+        }
+
+        auto attn_out = fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
+
+        attn_out = transpose(attn_out, {0, 2, 1, 3});
+        attn_out = reshape(attn_out, {B * T, cfg_.d_model});
+        attn_out = matmul(attn_out, transpose(proj_w, {1, 0}));
+        attn_out = reshape(attn_out, {B, T, cfg_.d_model});
+        if (train) attn_out = dropout_(attn_out);
+
+        auto m = rmsnorm(x, mlp_norm_w);
+        auto m_flat = reshape(m, {B * T, cfg_.d_model});
+        auto gate_flat = matmul(m_flat, transpose(w_gate, {1, 0}));
+        auto up_flat = matmul(m_flat, transpose(w_up, {1, 0}));
+        auto gate = reshape(gate_flat, {B, T, hidden_});
+        auto up = reshape(up_flat, {B, T, hidden_});
+        auto silu_result = train
+            ? multiply(multiply(gate, sigmoid(gate)), up)
+            : compiled_swiglu({gate, up})[0];
+        auto combined_flat = reshape(silu_result, {B * T, hidden_});
+        auto mlp_out_flat = matmul(combined_flat, transpose(w_out, {1, 0}));
+        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+        if (train) mlp_out = dropout_(mlp_out);
+
+        x = x + attn_out + mlp_out;
+    }
+
+    const array& ln_f_w = params[pi++];
+    x = rmsnorm(x, ln_f_w);
+    auto x_flat = reshape(x, {B * T, cfg_.d_model});
+    auto logits_flat = matmul(x_flat, transpose(token_emb, {1, 0}));
+    auto logits = reshape(logits_flat, {B, T, cfg_.vocab_size});
+    return logits;
+}
+
+array GPT::loss_functional(const std::vector<array>& params, const array& idx, const array& targets, bool train) const {
+    auto logits = forward_functional(params, idx, train);
+    auto lse = logsumexp(logits, -1, true);
+    auto log_probs = logits - lse;
+    auto tgt = expand_dims(targets, -1);
+    auto picked = squeeze(take_along_axis(log_probs, tgt, -1), -1);
+    return -mean(picked);
+}
+
 // --- Quantization helpers ---
 
 GPT::QuantW GPT::quantize_weight(const array& w) {
@@ -198,15 +289,55 @@ void GPT::quantize_for_inference() {
     fprintf(stderr, "Quantized %d layers for inference (4-bit, group=64)\n", (int)q_qkv_.size());
 }
 
-// --- KV-cached forward with quantized weights + fast kernels ---
+// --- Inference dtype promotion ------------------------------------------------
 
-array GPT::forward_cached(const array& idx,
-                            std::vector<std::pair<array, array>>& kv_cache,
-                            int prev_len) {
+void GPT::promote_for_inference(Dtype dtype) {
+    if (dtype != float32 && dtype != bfloat16 && dtype != float16) {
+        fprintf(stderr, "promote_for_inference: unsupported dtype, keeping float32\n");
+        return;
+    }
+    token_emb_ = astype(token_emb_, dtype);
+    for (auto& b : blocks_) {
+        b.attn_norm_w = astype(b.attn_norm_w, dtype);
+        b.qkv_w = astype(b.qkv_w, dtype);
+        b.q_norm_w = astype(b.q_norm_w, dtype);
+        b.k_norm_w = astype(b.k_norm_w, dtype);
+        b.proj_w = astype(b.proj_w, dtype);
+        b.mlp_norm_w = astype(b.mlp_norm_w, dtype);
+        b.w_gate = astype(b.w_gate, dtype);
+        b.w_up = astype(b.w_up, dtype);
+        b.w_out = astype(b.w_out, dtype);
+    }
+    ln_f_w_ = astype(ln_f_w_, dtype);
+    eval(token_emb_, ln_f_w_);
+    for (auto& b : blocks_) {
+        eval(b.attn_norm_w, b.qkv_w, b.q_norm_w, b.k_norm_w, b.proj_w,
+             b.mlp_norm_w, b.w_gate, b.w_up, b.w_out);
+    }
+    infer_dtype_ = dtype;
+    fprintf(stderr, "Promoted parameters to %s for inference\n",
+            dtype == bfloat16 ? "bfloat16" : (dtype == float16 ? "float16" : "float32"));
+}
+
+// --- Compiled decode step (T=1, stable KV cache shapes) -----------------------
+
+std::vector<array> GPT::decode_step_impl(const std::vector<array>& inputs) {
+    const auto& idx = inputs[0];
+    auto k_cache = inputs[1];
+    auto v_cache = inputs[2];
+    auto prev_len = inputs[3];
+
     int B = idx.shape(0);
     int T = idx.shape(1);
+    int V = cfg_.vocab_size;
 
     auto x = take(token_emb_, idx, 0);
+
+    // Position mask for the full block_size cache: positions 0..prev_len valid.
+    auto positions = arange(0, cfg_.block_size, int32);
+    auto valid = less_equal(positions, prev_len);
+    auto mask1d = where(valid, array(0.0f, infer_dtype_), array(-1e9f, infer_dtype_));
+    auto mask = expand_dims(mask1d, {0, 1, 2});
 
     float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
 
@@ -237,7 +368,201 @@ array GPT::forward_cached(const array& idx,
             k = rmsnorm(k, b.k_norm_w);
         }
 
-        if (prev_len == 0) {
+        k_cache = scatter(k_cache, prev_len, k, 2);
+        v_cache = scatter(v_cache, prev_len, v, 2);
+
+        auto attn_out = fast::scaled_dot_product_attention(
+            q, k_cache, v_cache, attn_scale, "", mask);
+
+        attn_out = transpose(attn_out, {0, 2, 1, 3});
+        attn_out = reshape(attn_out, {B * T, cfg_.d_model});
+
+        auto proj_out = quantized_
+            ? qmatmul(attn_out, q_proj_[li])
+            : matmul(attn_out, transpose(b.proj_w, {1, 0}));
+        attn_out = reshape(proj_out, {B, T, cfg_.d_model});
+
+        auto m = rmsnorm(x, b.mlp_norm_w);
+        auto m_flat = reshape(m, {B * T, cfg_.d_model});
+
+        auto gate_flat = quantized_
+            ? qmatmul(m_flat, q_gate_[li])
+            : matmul(m_flat, transpose(b.w_gate, {1, 0}));
+        auto up_flat = quantized_
+            ? qmatmul(m_flat, q_up_[li])
+            : matmul(m_flat, transpose(b.w_up, {1, 0}));
+        auto gate = reshape(gate_flat, {B, T, hidden_});
+        auto up = reshape(up_flat, {B, T, hidden_});
+        auto silu_result = compiled_swiglu({gate, up})[0];
+        auto combined_flat = reshape(silu_result, {B * T, hidden_});
+
+        auto mlp_out_flat = quantized_
+            ? qmatmul(combined_flat, q_out_[li])
+            : matmul(combined_flat, transpose(b.w_out, {1, 0}));
+        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+
+        x = x + attn_out + mlp_out;
+    }
+
+    x = rmsnorm(x, ln_f_w_);
+    auto x_flat = reshape(x, {B * T, cfg_.d_model});
+
+    auto logits_flat = quantized_
+        ? qmatmul(x_flat, q_emb_)
+        : matmul(x_flat, transpose(token_emb_, {1, 0}));
+    auto logits = reshape(logits_flat, {B, T, V});
+
+    return {logits, k_cache, v_cache};
+}
+
+// --- KV-cached forward with quantized weights + fast kernels ------------------
+
+array GPT::forward_cached(const array& idx, array& k_cache, array& v_cache, int prev_len) {
+    int B = idx.shape(0);
+    int T = idx.shape(1);
+
+    // Non-quantized T=1 decode: use the compiled step with stable cache shapes.
+    if (T == 1 && !quantized_) {
+        auto& compiled = compiled_decode_fp32_;
+        if (!compiled) {
+            std::function<std::vector<array>(const std::vector<array>&)> step =
+                [this](const std::vector<array>& inputs) -> std::vector<array> {
+                return decode_step_impl(inputs);
+            };
+            compiled = compile(step, false);
+        }
+        auto out = compiled({idx, k_cache, v_cache, array(prev_len)});
+        k_cache = out[1];
+        v_cache = out[2];
+        return out[0];
+    }
+
+    // Multi-token prefill / decode: write into the stable cache and attend
+    // causally over the slice of valid positions.
+    auto x = take(token_emb_, idx, 0);
+    auto idx_range = arange(0, T, int32);
+
+    float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
+
+    for (int li = 0; li < (int)blocks_.size(); li++) {
+        auto& b = blocks_[li];
+        auto h = rmsnorm(x, b.attn_norm_w);
+
+        auto h_flat = reshape(h, {B * T, cfg_.d_model});
+
+        auto qkv_flat = quantized_
+            ? qmatmul(h_flat, q_qkv_[li])
+            : matmul(h_flat, transpose(b.qkv_w, {1, 0}));
+        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
+        auto qkv_parts = split(qkv, 3, -1);
+        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
+        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
+        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
+
+        q = transpose(q, {0, 2, 1, 3});
+        k = transpose(k, {0, 2, 1, 3});
+        v = transpose(v, {0, 2, 1, 3});
+
+        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
+        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
+
+        if (cfg_.qk_norm) {
+            q = rmsnorm(q, b.q_norm_w);
+            k = rmsnorm(k, b.k_norm_w);
+        }
+
+        // Reshape K/V so the leading dimension is the index length and the
+        // remaining dimensions match the cache slice shape for scatter.
+        auto k_for_scatter = reshape(transpose(k, {2, 0, 1, 3}), {T, 1, cfg_.n_head, 1, head_dim_});
+        auto v_for_scatter = reshape(transpose(v, {2, 0, 1, 3}), {T, 1, cfg_.n_head, 1, head_dim_});
+        k_cache = scatter(k_cache, idx_range, k_for_scatter, 2);
+        v_cache = scatter(v_cache, idx_range, v_for_scatter, 2);
+
+        auto k_sliced = slice(k_cache, {0, 0, 0, 0}, {B, cfg_.n_head, prev_len + T, head_dim_});
+        auto v_sliced = slice(v_cache, {0, 0, 0, 0}, {B, cfg_.n_head, prev_len + T, head_dim_});
+
+        auto attn_out = fast::scaled_dot_product_attention(q, k_sliced, v_sliced, attn_scale, "causal");
+
+        attn_out = transpose(attn_out, {0, 2, 1, 3});
+        attn_out = reshape(attn_out, {B * T, cfg_.d_model});
+
+        auto proj_out = quantized_
+            ? qmatmul(attn_out, q_proj_[li])
+            : matmul(attn_out, transpose(b.proj_w, {1, 0}));
+        attn_out = reshape(proj_out, {B, T, cfg_.d_model});
+
+        auto m = rmsnorm(x, b.mlp_norm_w);
+        auto m_flat = reshape(m, {B * T, cfg_.d_model});
+
+        auto gate_flat = quantized_
+            ? qmatmul(m_flat, q_gate_[li])
+            : matmul(m_flat, transpose(b.w_gate, {1, 0}));
+        auto up_flat = quantized_
+            ? qmatmul(m_flat, q_up_[li])
+            : matmul(m_flat, transpose(b.w_up, {1, 0}));
+        auto gate = reshape(gate_flat, {B, T, hidden_});
+        auto up = reshape(up_flat, {B, T, hidden_});
+        auto silu_result = compiled_swiglu({gate, up})[0];
+        auto combined_flat = reshape(silu_result, {B * T, hidden_});
+
+        auto mlp_out_flat = quantized_
+            ? qmatmul(combined_flat, q_out_[li])
+            : matmul(combined_flat, transpose(b.w_out, {1, 0}));
+        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+
+        x = x + attn_out + mlp_out;
+    }
+
+    x = rmsnorm(x, ln_f_w_);
+    auto x_flat = reshape(x, {B * T, cfg_.d_model});
+
+    auto logits_flat = quantized_
+        ? qmatmul(x_flat, q_emb_)
+        : matmul(x_flat, transpose(token_emb_, {1, 0}));
+    auto logits = reshape(logits_flat, {B, T, cfg_.vocab_size});
+    return logits;
+}
+
+// --- Growing-cache decode (T=1) for quantized fast path ----------------------
+
+array GPT::forward_decode_growing(
+    const array& idx,
+    std::vector<std::pair<array, array>>& kv_cache,
+    const array& prev_len) {
+    int B = idx.shape(0);
+    int T = idx.shape(1);
+    int prev_len_int = prev_len.item<int>();
+
+    auto x = take(token_emb_, idx, 0);
+    float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
+
+    for (int li = 0; li < (int)blocks_.size(); li++) {
+        auto& b = blocks_[li];
+        auto h = rmsnorm(x, b.attn_norm_w);
+
+        auto h_flat = reshape(h, {B * T, cfg_.d_model});
+        auto qkv_flat = quantized_
+            ? qmatmul(h_flat, q_qkv_[li])
+            : matmul(h_flat, transpose(b.qkv_w, {1, 0}));
+        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
+        auto qkv_parts = split(qkv, 3, -1);
+        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
+        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
+        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
+
+        q = transpose(q, {0, 2, 1, 3});
+        k = transpose(k, {0, 2, 1, 3});
+        v = transpose(v, {0, 2, 1, 3});
+
+        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
+        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
+
+        if (cfg_.qk_norm) {
+            q = rmsnorm(q, b.q_norm_w);
+            k = rmsnorm(k, b.k_norm_w);
+        }
+
+        if (prev_len_int == 0) {
             kv_cache[li].first = k;
             kv_cache[li].second = v;
         } else {
@@ -247,7 +572,8 @@ array GPT::forward_cached(const array& idx,
         auto& k_cached = kv_cache[li].first;
         auto& v_cached = kv_cache[li].second;
 
-        auto attn_out = fast::scaled_dot_product_attention(q, k_cached, v_cached, attn_scale, "causal");
+        auto attn_out = fast::scaled_dot_product_attention(
+            q, k_cached, v_cached, attn_scale, "causal");
 
         attn_out = transpose(attn_out, {0, 2, 1, 3});
         attn_out = reshape(attn_out, {B * T, cfg_.d_model});

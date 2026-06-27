@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <algorithm>
 #include <numeric>
@@ -9,6 +10,12 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include <mlx/mlx.h>
 
@@ -37,7 +44,14 @@ static std::vector<std::string> param_names(const GPTConfig& cfg) {
     return names;
 }
 
+static void validate_path(const std::string& path) {
+    if (path.empty()) throw std::runtime_error("empty path");
+    if (path.find('\0') != std::string::npos) throw std::runtime_error("path contains null byte");
+    if (path.size() > 4096) throw std::runtime_error("path too long");
+}
+
 void save_checkpoint(const std::string& path, GPT& model) {
+    validate_path(path);
     auto ptrs = model.parameters();
     auto names = param_names(model.config());
     if (ptrs.size() != names.size()) {
@@ -51,6 +65,7 @@ void save_checkpoint(const std::string& path, GPT& model) {
 }
 
 void load_checkpoint(const std::string& path, GPT& model) {
+    validate_path(path);
     auto [arrays, meta] = mx::load_safetensors(path);
     auto names = param_names(model.config());
     std::vector<mx::array> params;
@@ -69,10 +84,9 @@ void load_checkpoint(const std::string& path, GPT& model) {
 // Tokenizer via Python subprocess
 // ---------------------------------------------------------------------------
 
-static const char* tok_script_path = "/tmp/mlx_cpp_tok.py";
+static std::string tok_script_path;
 
 static std::string find_python() {
-    // Try venv python first, then system python3
     const char* candidates[] = {
         "../mainrun/.venv/bin/python3",
         "mainrun/.venv/bin/python3",
@@ -80,8 +94,16 @@ static std::string find_python() {
         "python3",
     };
     for (auto& p : candidates) {
-        std::string cmd = std::string(p) + " -c 'import tokenizers' 2>/dev/null";
-        if (std::system(cmd.c_str()) == 0) return p;
+        pid_t pid = fork();
+        if (pid < 0) continue;
+        if (pid == 0) {
+            const char* argv[] = {p, "-c", "import tokenizers", nullptr};
+            execvp(p, const_cast<char* const*>(argv));
+            _exit(127);
+        }
+        int status = 0;
+        if (waitpid(pid, &status, 0) > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            return p;
     }
     return "python3";
 }
@@ -99,45 +121,57 @@ static void ensure_tok_script() {
         "elif sys.argv[2] == 'decode':\n"
         "    ids = json.loads(sys.argv[3])\n"
         "    print(tok.decode(ids, skip_special_tokens=True))\n";
-    FILE* f = std::fopen(tok_script_path, "w");
-    if (!f) throw std::runtime_error("ensure_tok_script: cannot write helper");
-    std::fputs(script, f);
-    std::fclose(f);
+    char template_path[] = "/tmp/mlx_cpp_tok_XXXXXX";
+    int fd = mkstemp(template_path);
+    if (fd < 0) throw std::runtime_error("ensure_tok_script: mkstemp failed");
+    size_t len = std::strlen(script);
+    ssize_t n = write(fd, script, len);
+    close(fd);
+    if (n != (ssize_t)len) {
+        unlink(template_path);
+        throw std::runtime_error("ensure_tok_script: write failed");
+    }
+    tok_script_path = template_path;
     written = true;
 }
 
-// ponytail: shell-escape a string for safe single-quoted argv
-static std::string shell_escape(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
+static std::string run_capture(const std::vector<std::string>& argv) {
+    if (argv.empty()) throw std::runtime_error("run_capture: empty argv");
+    int pipefd[2];
+    if (pipe(pipefd) < 0) throw std::runtime_error("run_capture: pipe failed");
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        throw std::runtime_error("run_capture: fork failed");
     }
-    out += '\'';
-    return out;
-}
-
-static std::string run_capture(const std::string& cmd) {
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) throw std::runtime_error("run_capture: popen failed for: " + cmd);
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        std::vector<char*> args;
+        for (auto& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+        args.push_back(nullptr);
+        execvp(argv[0].c_str(), args.data());
+        _exit(127);
+    }
+    close(pipefd[1]);
     std::string out;
     char buf[4096];
-    while (size_t n = std::fread(buf, 1, sizeof(buf), pipe)) {
-        out.append(buf, n);
-    }
-    int rc = pclose(pipe);
-    if (rc != 0) throw std::runtime_error("run_capture: command failed (rc=" +
-                                          std::to_string(rc) + "): " + out);
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) out.append(buf, n);
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        throw std::runtime_error("run_capture: command failed");
     return out;
 }
 
 std::vector<uint32_t> encode_text(const std::string& text, const std::string& tokenizer_path) {
     ensure_tok_script();
     static std::string py = find_python();
-    std::string cmd = py + " " + std::string(tok_script_path) + " " +
-                      shell_escape(tokenizer_path) + " encode " + shell_escape(text);
-    std::string out = run_capture(cmd);
-    // parse JSON array of ints
+    std::string out = run_capture({py, tok_script_path, tokenizer_path, "encode", text});
     std::vector<uint32_t> ids;
     std::string s = out;
     s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
@@ -163,10 +197,7 @@ std::string decode_ids(const std::vector<uint32_t>& ids, const std::string& toke
         json_ids += std::to_string(ids[i]);
     }
     json_ids += "]";
-    std::string cmd = py + " " + std::string(tok_script_path) + " " +
-                      shell_escape(tokenizer_path) + " decode " + shell_escape(json_ids);
-    std::string out = run_capture(cmd);
-    // strip trailing newline
+    std::string out = run_capture({py, tok_script_path, tokenizer_path, "decode", json_ids});
     if (!out.empty() && out.back() == '\n') out.pop_back();
     return out;
 }
@@ -204,6 +235,8 @@ InferenceEngine::InferenceEngine(const std::string& checkpoint_path,
     : model_(config), tokenizer_path_(tokenizer_path) {
     block_size_ = config.block_size;
     load_checkpoint(checkpoint_path, model_);
+    // Use float16 weights/activations for faster memory-bound inference.
+    model_.promote_for_inference(mx::bfloat16);
 }
 
 std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
@@ -212,10 +245,27 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
     int n_layer = model_.config().n_layer;
-    std::vector<std::pair<mx::array, mx::array>> kv_cache;
-    kv_cache.reserve(n_layer);
-    for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+    int n_head = model_.config().n_head;
+    int d_model = model_.config().d_model;
+    int head_dim = d_model / n_head;
     int V = model_.config().vocab_size;
+
+    bool quantized = model_.is_quantized();
+
+    // Quantized path uses a growing KV cache with the optimized causal attention.
+    // Non-quantized path uses a pre-allocated stable cache and a custom mask.
+    std::vector<std::pair<mx::array, mx::array>> kv_cache_growing;
+    if (quantized) {
+        kv_cache_growing.reserve(n_layer);
+        for (int i = 0; i < n_layer; i++) {
+            kv_cache_growing.emplace_back(
+                mx::array({0.0f}, mx::float32),
+                mx::array({0.0f}, mx::float32));
+        }
+    }
+
+    mx::array k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+    mx::array v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
 
     // Prefill
     int T = static_cast<int>(tokens.size());
@@ -224,7 +274,9 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
         T = block_size_;
     }
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
-    mx::array logits = model_.forward_cached(idx, kv_cache, 0);
+    mx::array logits = quantized
+        ? model_.forward_decode_growing(idx, kv_cache_growing, mx::array(0))
+        : model_.forward_cached(idx, k_cache, v_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
     uint32_t next = sample_token(last, sampling);
     tokens.push_back(next);
@@ -234,17 +286,29 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     for (int step = 1; step < max_tokens; ++step) {
         if (static_cast<int>(next) == model_.config().eos_id) break;
         if (cached_len >= block_size_) {
-            kv_cache.clear();
-            for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
             int start = static_cast<int>(tokens.size()) - block_size_;
             std::vector<uint32_t> window(tokens.begin() + start, tokens.end());
             T = block_size_;
             mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
-            logits = model_.forward_cached(idx2, kv_cache, 0);
+            if (quantized) {
+                kv_cache_growing.clear();
+                for (int i = 0; i < n_layer; i++) {
+                    kv_cache_growing.emplace_back(
+                        mx::array({0.0f}, mx::float32),
+                        mx::array({0.0f}, mx::float32));
+                }
+                logits = model_.forward_decode_growing(idx2, kv_cache_growing, mx::array(0));
+            } else {
+                k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                logits = model_.forward_cached(idx2, k_cache, v_cache, 0);
+            }
             cached_len = T;
         } else {
             mx::array one(mx::array(&next, {1, 1}, mx::uint32));
-            logits = model_.forward_cached(one, kv_cache, cached_len);
+            logits = quantized
+                ? model_.forward_decode_growing(one, kv_cache_growing, mx::array(cached_len))
+                : model_.forward_cached(one, k_cache, v_cache, cached_len);
             cached_len += 1;
         }
         last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
@@ -262,10 +326,25 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
     int n_layer = model_.config().n_layer;
-    std::vector<std::pair<mx::array, mx::array>> kv_cache;
-    kv_cache.reserve(n_layer);
-    for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+    int n_head = model_.config().n_head;
+    int d_model = model_.config().d_model;
+    int head_dim = d_model / n_head;
     int V = model_.config().vocab_size;
+
+    bool quantized = model_.is_quantized();
+
+    std::vector<std::pair<mx::array, mx::array>> kv_cache_growing;
+    if (quantized) {
+        kv_cache_growing.reserve(n_layer);
+        for (int i = 0; i < n_layer; i++) {
+            kv_cache_growing.emplace_back(
+                mx::array({0.0f}, mx::float32),
+                mx::array({0.0f}, mx::float32));
+        }
+    }
+
+    mx::array k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+    mx::array v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
 
     using clock = std::chrono::steady_clock;
 
@@ -277,7 +356,9 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
         T = block_size_;
     }
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
-    mx::array logits = model_.forward_cached(idx, kv_cache, 0);
+    mx::array logits = quantized
+        ? model_.forward_decode_growing(idx, kv_cache_growing, mx::array(0))
+        : model_.forward_cached(idx, k_cache, v_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
     uint32_t next = sample_token(last, sampling);
     tokens.push_back(next);
@@ -290,17 +371,29 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
 
     while (!stopped && generated < max_tokens) {
         if (cached_len >= block_size_) {
-            kv_cache.clear();
-            for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
             int start = static_cast<int>(tokens.size()) - block_size_;
             std::vector<uint32_t> window(tokens.begin() + start, tokens.end());
             T = block_size_;
             mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
-            logits = model_.forward_cached(idx2, kv_cache, 0);
+            if (quantized) {
+                kv_cache_growing.clear();
+                for (int i = 0; i < n_layer; i++) {
+                    kv_cache_growing.emplace_back(
+                        mx::array({0.0f}, mx::float32),
+                        mx::array({0.0f}, mx::float32));
+                }
+                logits = model_.forward_decode_growing(idx2, kv_cache_growing, mx::array(0));
+            } else {
+                k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
+                logits = model_.forward_cached(idx2, k_cache, v_cache, 0);
+            }
             cached_len = T;
         } else {
             mx::array one(mx::array(&next, {1, 1}, mx::uint32));
-            logits = model_.forward_cached(one, kv_cache, cached_len);
+            logits = quantized
+                ? model_.forward_decode_growing(one, kv_cache_growing, mx::array(cached_len))
+                : model_.forward_cached(one, k_cache, v_cache, cached_len);
             cached_len += 1;
         }
         last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
