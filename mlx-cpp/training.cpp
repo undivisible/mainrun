@@ -1,7 +1,9 @@
 #include "training.h"
 #include "model.h"
 #include "optimizer.h"
+#include "inference.h"
 #include <mlx/transforms.h>
+#include <mlx/compile.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -70,16 +72,40 @@ struct ModelEMA {
   std::vector<array> swap_out() { return backup; }
 };
 
-static float eval_loss(GPT& model, DataLoader& data) {
+// Compiled eval: forward + cross_entropy for a single batch.
+// No randomness (no dropout), so the graph is stable and compilation works.
+static std::vector<array> eval_single_batch_impl(const std::vector<array>& inputs) {
+  extern GPT* g_eval_model;
+  extern int g_eval_B, g_eval_T, g_eval_V;
+  size_t np = inputs.size() - 2;
+  std::vector<array> p(inputs.begin(), inputs.begin() + np);
+  g_eval_model->set_parameters(p);
+  auto logits = g_eval_model->forward(inputs[np], false);
+  auto lf = reshape(logits, {g_eval_B * g_eval_T, g_eval_V});
+  auto tf = reshape(inputs[np + 1], {g_eval_B * g_eval_T});
+  return {cross_entropy_sum(lf, tf)};
+}
+
+GPT* g_eval_model = nullptr;
+int g_eval_B = 0, g_eval_T = 0, g_eval_V = 0;
+
+static float eval_loss_compiled(GPT& model, DataLoader& data,
+                                const std::function<std::vector<array>(const std::vector<array>&)>& compiled_eval,
+                                const std::vector<array>& params) {
   data.reset_val_ptr();
   int B = data.batch_size(), T = data.seq_len(), V = data.vocab_size();
+  g_eval_model = &model;
+  g_eval_B = B; g_eval_T = T; g_eval_V = V;
   array total = array(0.0f);
   while (auto b = data.next_val_batch()) {
     auto& [x, y] = *b;
-    auto logits = model.forward(x, false);
-    auto lf = reshape(logits, {B * T, V});
-    auto tf = reshape(y, {B * T});
-    total = total + cross_entropy_sum(lf, tf);
+    std::vector<array> inputs;
+    inputs.reserve(params.size() + 2);
+    for (const auto& p : params) inputs.push_back(p);
+    inputs.push_back(x);
+    inputs.push_back(y);
+    auto result = compiled_eval(inputs);
+    total = total + result[0];
   }
   eval(total);
   return total.item<float>() / (float)data.val_char_count();
@@ -98,8 +124,6 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   mc.qk_norm = cfg.qk_norm;
   GPT model(mc);
 
-  // ponytail: model.parameters() returns pointers; dereference into a value vector
-  // that we own and push back via set_parameters each step.
   std::vector<array> params;
   for (auto* p : model.parameters()) params.push_back(*p);
   fprintf(stderr, "param tensors: %zu\n", params.size());
@@ -113,8 +137,7 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   float best_val = 1e9f;
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  // ponytail: compile disabled — dropout generates new random masks each step,
-  // causing graph recompilation overhead that's worse than no compilation.
+  // Training loss + gradient function (NOT compiled — dropout changes graph each step)
   auto loss_fn = std::function<array(const std::vector<array>&)>(
     [&](const std::vector<array>& inputs) {
       size_t np = inputs.size() - 2;
@@ -123,6 +146,9 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
       return model.loss(inputs[np], inputs[np + 1], true);
     });
   auto vg = value_and_grad(loss_fn, argnums);
+
+  // Compiled eval function (no dropout → stable graph)
+  auto compiled_eval = compile(std::function<std::vector<array>(const std::vector<array>&)>(eval_single_batch_impl));
 
   for (int step = 0; step < cfg.max_steps; step++) {
     float lr;
@@ -134,7 +160,6 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
 
     auto [x, y] = data.get_train_batch();
 
-    // Build inputs = [params..., x, y]
     std::vector<array> inputs;
     inputs.reserve(params.size() + 2);
     for (auto& p : params) inputs.push_back(p);
@@ -151,25 +176,23 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
     if (cfg.use_ema) ema.update(params, step);
 
     if (step == 0 || step % cfg.eval_interval == 0 || step == cfg.max_steps - 1) {
-      float val_ema = 0.0f, val_raw = 0.0f;
+      float val_ema = 0.0f;
       if (cfg.use_ema) {
-        model.set_parameters(ema.swap_in(params));
-        val_ema = eval_loss(model, data);
+        auto ema_params = ema.swap_in(params);
+        val_ema = eval_loss_compiled(model, data, compiled_eval, ema_params);
         model.set_parameters(ema.swap_out());
-        val_raw = eval_loss(model, data);
       } else {
-        val_raw = eval_loss(model, data);
-        val_ema = val_raw;
+        val_ema = eval_loss_compiled(model, data, compiled_eval, params);
       }
       auto now = std::chrono::high_resolution_clock::now();
       double elapsed = std::chrono::duration<double>(now - t_start).count();
       if (val_ema < best_val) best_val = val_ema;
-      if (val_raw < best_val) best_val = val_raw;
-      printf("Step %d: train=%.4f, val_ema=%.4f, val_raw=%.4f, lr=%.5f, %.1fs elapsed, %.0fms/step\n",
-             step, train_loss, val_ema, val_raw, lr, elapsed, elapsed * 1000 / (step + 1));
+      printf("Step %d: train=%.4f, val_ema=%.4f, lr=%.5f, %.1fs elapsed, %.0fms/step\n",
+             step, train_loss, val_ema, lr, elapsed, elapsed * 1000 / (step + 1));
       fflush(stdout);
     }
   }
+  save_checkpoint("checkpoint.safetensors", model);
   return best_val;
 }
 
@@ -199,7 +222,7 @@ TrainConfig v12_config() {
   return c;
 }
 TrainConfig v13_config() {
-  TrainConfig c;  // same as baseline, token augmentation would need data loader changes
+  TrainConfig c;
   return c;
 }
 TrainConfig v14_config() {
@@ -238,4 +261,3 @@ void run_all_experiments(DataLoader& data) {
   printf("Best: %s with val=%.6f\n", results[best_idx].first.c_str(), results[best_idx].second);
   if (results[best_idx].second < BASELINE) printf("BEAT BASELINE!\n");
 }
-

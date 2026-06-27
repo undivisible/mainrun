@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mlx/mlx.h>
+#include <mlx/fast.h>
 #include <random>
 #include <utility>
 #include <vector>
@@ -26,10 +27,22 @@ public:
     mlx::core::array forward(const mlx::core::array& idx, bool train);
     mlx::core::array loss(const mlx::core::array& idx, const mlx::core::array& targets, bool train);
 
+    // KV-cached forward for efficient autoregressive generation.
+    // prev_len: number of tokens already cached (0 for first call).
+    // kv_cache: [n_layer, 2, B, n_head, T_cached, head_dim] — updated in place.
+    // Returns logits for the input tokens only.
+    mlx::core::array forward_cached(const mlx::core::array& idx,
+                                    std::vector<std::pair<mlx::core::array, mlx::core::array>>& kv_cache,
+                                    int prev_len);
+
     std::vector<mlx::core::array*> parameters();
     void set_parameters(const std::vector<mlx::core::array>& params);
 
     GPTConfig config() const { return cfg_; }
+
+    // Cached RoPE cos/sin for the model's block_size (computed once at init).
+    const mlx::core::array& rope_cos() const { return rope_cos_; }
+    const mlx::core::array& rope_sin() const { return rope_sin_; }
 
 private:
     GPTConfig cfg_;
@@ -59,11 +72,15 @@ private:
     std::vector<Block> blocks_;
     mlx::core::array ln_f_w_;
 
+    // Cached RoPE tables for block_size
+    mlx::core::array rope_cos_;
+    mlx::core::array rope_sin_;
+
     static std::vector<Block> make_blocks(std::mt19937& gen, const GPTConfig& cfg, int hd, int hidden);
+    void init_rope_cache();
 
     mlx::core::array rmsnorm(const mlx::core::array& x, const mlx::core::array& w);
     mlx::core::array dropout_(const mlx::core::array& x);
-    std::pair<mlx::core::array, mlx::core::array> rope_cos_sin(int seq_len);
     mlx::core::array apply_rope(const mlx::core::array& x, const mlx::core::array& cos, const mlx::core::array& sin);
     mlx::core::array make_mask(const mlx::core::array& idx);
 };

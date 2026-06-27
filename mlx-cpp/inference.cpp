@@ -71,6 +71,21 @@ void load_checkpoint(const std::string& path, GPT& model) {
 
 static const char* tok_script_path = "/tmp/mlx_cpp_tok.py";
 
+static std::string find_python() {
+    // Try venv python first, then system python3
+    const char* candidates[] = {
+        "../mainrun/.venv/bin/python3",
+        "mainrun/.venv/bin/python3",
+        "../../mainrun/.venv/bin/python3",
+        "python3",
+    };
+    for (auto& p : candidates) {
+        std::string cmd = std::string(p) + " -c 'import tokenizers' 2>/dev/null";
+        if (std::system(cmd.c_str()) == 0) return p;
+    }
+    return "python3";
+}
+
 static void ensure_tok_script() {
     static bool written = false;
     if (written) return;
@@ -118,7 +133,8 @@ static std::string run_capture(const std::string& cmd) {
 
 std::vector<uint32_t> encode_text(const std::string& text, const std::string& tokenizer_path) {
     ensure_tok_script();
-    std::string cmd = "python3 " + std::string(tok_script_path) + " " +
+    static std::string py = find_python();
+    std::string cmd = py + " " + std::string(tok_script_path) + " " +
                       shell_escape(tokenizer_path) + " encode " + shell_escape(text);
     std::string out = run_capture(cmd);
     // parse JSON array of ints
@@ -140,13 +156,14 @@ std::vector<uint32_t> encode_text(const std::string& text, const std::string& to
 
 std::string decode_ids(const std::vector<uint32_t>& ids, const std::string& tokenizer_path) {
     ensure_tok_script();
+    static std::string py = find_python();
     std::string json_ids = "[";
     for (size_t i = 0; i < ids.size(); ++i) {
         if (i) json_ids += ",";
         json_ids += std::to_string(ids[i]);
     }
     json_ids += "]";
-    std::string cmd = "python3 " + std::string(tok_script_path) + " " +
+    std::string cmd = py + " " + std::string(tok_script_path) + " " +
                       shell_escape(tokenizer_path) + " decode " + shell_escape(json_ids);
     std::string out = run_capture(cmd);
     // strip trailing newline
@@ -230,21 +247,45 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     auto tokens = encode_text(prompt, tokenizer_path_);
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
-    for (int step = 0; step < max_tokens; ++step) {
-        // truncate to last block_size tokens
-        if (static_cast<int>(tokens.size()) > block_size_) {
-            tokens.erase(tokens.begin(), tokens.end() - block_size_);
-        }
-        int T = static_cast<int>(tokens.size());
-        mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
-        mx::array logits = model_.forward(idx, false);  // [1, T, V]
-        int V = static_cast<int>(logits.shape()[2]);
-        // last position logits: [1, 1, V] -> [V]
-        mx::array last = mx::slice(logits, {0, T - 1, 0}, {1, T, V});
-        last = mx::reshape(last, {V});
-        uint32_t next = sample_token(last, sampling);
-        tokens.push_back(next);
+    int n_layer = model_.config().n_layer;
+    std::vector<std::pair<mx::array, mx::array>> kv_cache;
+    kv_cache.reserve(n_layer);
+    for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+    int V = model_.config().vocab_size;
+
+    // Prefill: process all prompt tokens at once
+    int T = static_cast<int>(tokens.size());
+    if (T > block_size_) {
+        tokens.erase(tokens.begin(), tokens.end() - block_size_);
+        T = block_size_;
+    }
+    mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
+    mx::array logits = model_.forward_cached(idx, kv_cache, 0);
+    mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
+    uint32_t next = sample_token(last, sampling);
+    tokens.push_back(next);
+    int cached_len = T;
+
+    // Decode: one token at a time with KV cache
+    for (int step = 1; step < max_tokens; ++step) {
         if (static_cast<int>(next) == model_.config().eos_id) break;
+        if (cached_len >= block_size_) {
+            kv_cache.clear();
+            for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+            int start = static_cast<int>(tokens.size()) - block_size_;
+            std::vector<uint32_t> window(tokens.begin() + start, tokens.end());
+            T = block_size_;
+            mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
+            logits = model_.forward_cached(idx2, kv_cache, 0);
+            cached_len = T;
+        } else {
+            mx::array one(mx::array(&next, {1, 1}, mx::uint32));
+            logits = model_.forward_cached(one, kv_cache, cached_len);
+            cached_len += 1;
+        }
+        last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
+        next = sample_token(last, sampling);
+        tokens.push_back(next);
     }
 
     return decode_ids(tokens, tokenizer_path_);
@@ -256,21 +297,27 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     int prompt_tokens = static_cast<int>(tokens.size());
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
+    int n_layer = model_.config().n_layer;
+    std::vector<std::pair<mx::array, mx::array>> kv_cache;
+    kv_cache.reserve(n_layer);
+    for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+    int V = model_.config().vocab_size;
+
     using clock = std::chrono::steady_clock;
 
-    // prefill: first forward pass over the full prompt
+    // Prefill
     auto t0 = clock::now();
-    if (static_cast<int>(tokens.size()) > block_size_) {
-        tokens.erase(tokens.begin(), tokens.end() - block_size_);
-    }
     int T = static_cast<int>(tokens.size());
+    if (T > block_size_) {
+        tokens.erase(tokens.begin(), tokens.end() - block_size_);
+        T = block_size_;
+    }
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
-    mx::array logits = model_.forward(idx, false);
-    int V = static_cast<int>(logits.shape()[2]);
-    mx::array last = mx::slice(logits, {0, T - 1, 0}, {1, T, V});
-    last = mx::reshape(last, {V});
+    mx::array logits = model_.forward_cached(idx, kv_cache, 0);
+    mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
     uint32_t next = sample_token(last, sampling);
     tokens.push_back(next);
+    int cached_len = T;
     mx::eval(logits);
     auto t1 = clock::now();
     double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -279,16 +326,22 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     bool stopped = (static_cast<int>(next) == model_.config().eos_id);
 
     while (!stopped && generated < max_tokens) {
-        if (static_cast<int>(tokens.size()) > block_size_) {
-            tokens.erase(tokens.begin(), tokens.end() - block_size_);
+        if (cached_len >= block_size_) {
+            kv_cache.clear();
+            for (int i = 0; i < n_layer; i++) kv_cache.emplace_back(mx::array({0.0f}, mx::float32), mx::array({0.0f}, mx::float32));
+            int start = static_cast<int>(tokens.size()) - block_size_;
+            std::vector<uint32_t> window(tokens.begin() + start, tokens.end());
+            T = block_size_;
+            mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
+            logits = model_.forward_cached(idx2, kv_cache, 0);
+            cached_len = T;
+        } else {
+            mx::array one(mx::array(&next, {1, 1}, mx::uint32));
+            logits = model_.forward_cached(one, kv_cache, cached_len);
+            cached_len += 1;
         }
-        T = static_cast<int>(tokens.size());
-        mx::array idx2(mx::array(tokens.data(), {1, T}, mx::uint32));
-        mx::array lg = model_.forward(idx2, false);
-        int V2 = static_cast<int>(lg.shape()[2]);
-        mx::array lt = mx::slice(lg, {0, T - 1, 0}, {1, T, V2});
-        lt = mx::reshape(lt, {V2});
-        next = sample_token(lt, sampling);
+        last = mx::reshape(mx::slice(logits, {0, 0, 0}, {1, 1, V}), {V});
+        next = sample_token(last, sampling);
         tokens.push_back(next);
         ++generated;
         if (static_cast<int>(next) == model_.config().eos_id) stopped = true;

@@ -42,6 +42,5 @@ private:
     std::string tokenizer_path_;
     int block_size_;
 
-    // Sample next token from logits [V] using temperature + top-k + top-p.
     uint32_t sample_token(mlx::core::array& logits, const SamplingConfig& sampling);
 };
