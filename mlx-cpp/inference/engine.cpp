@@ -235,7 +235,7 @@ InferenceEngine::InferenceEngine(const std::string& checkpoint_path,
     : model_(config), tokenizer_path_(tokenizer_path) {
     block_size_ = config.block_size;
     load_checkpoint(checkpoint_path, model_);
-    // Use float16 weights/activations for faster memory-bound inference.
+    // Use bfloat16 weights/activations for faster memory-bound inference.
     model_.promote_for_inference(mx::bfloat16);
 }
 
@@ -244,7 +244,6 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     auto tokens = encode_text(prompt, tokenizer_path_);
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
-    int n_layer = model_.config().n_layer;
     int n_head = model_.config().n_head;
     int d_model = model_.config().d_model;
     int head_dim = d_model / n_head;
@@ -256,8 +255,8 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     // Non-quantized path uses a pre-allocated stable cache and a custom mask.
     std::vector<std::pair<mx::array, mx::array>> kv_cache_growing;
     if (quantized) {
-        kv_cache_growing.reserve(n_layer);
-        for (int i = 0; i < n_layer; i++) {
+        kv_cache_growing.reserve(model_.config().n_layer);
+        for (int i = 0; i < model_.config().n_layer; i++) {
             kv_cache_growing.emplace_back(
                 mx::array({0.0f}, mx::float32),
                 mx::array({0.0f}, mx::float32));
@@ -275,7 +274,7 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
     }
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
     mx::array logits = quantized
-        ? model_.forward_decode_growing(idx, kv_cache_growing, mx::array(0))
+        ? model_.forward_decode_growing(idx, kv_cache_growing, 0)
         : model_.forward_cached(idx, k_cache, v_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
     uint32_t next = sample_token(last, sampling);
@@ -292,12 +291,12 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
             mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
             if (quantized) {
                 kv_cache_growing.clear();
-                for (int i = 0; i < n_layer; i++) {
+                for (int i = 0; i < model_.config().n_layer; i++) {
                     kv_cache_growing.emplace_back(
                         mx::array({0.0f}, mx::float32),
                         mx::array({0.0f}, mx::float32));
                 }
-                logits = model_.forward_decode_growing(idx2, kv_cache_growing, mx::array(0));
+                logits = model_.forward_decode_growing(idx2, kv_cache_growing, 0);
             } else {
                 k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
                 v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
@@ -307,7 +306,7 @@ std::string InferenceEngine::generate(const std::string& prompt, int max_tokens,
         } else {
             mx::array one(mx::array(&next, {1, 1}, mx::uint32));
             logits = quantized
-                ? model_.forward_decode_growing(one, kv_cache_growing, mx::array(cached_len))
+                ? model_.forward_decode_growing(one, kv_cache_growing, cached_len)
                 : model_.forward_cached(one, k_cache, v_cache, cached_len);
             cached_len += 1;
         }
@@ -325,7 +324,6 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     int prompt_tokens = static_cast<int>(tokens.size());
     if (tokens.empty()) tokens.push_back(static_cast<uint32_t>(model_.config().eos_id));
 
-    int n_layer = model_.config().n_layer;
     int n_head = model_.config().n_head;
     int d_model = model_.config().d_model;
     int head_dim = d_model / n_head;
@@ -335,8 +333,8 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
 
     std::vector<std::pair<mx::array, mx::array>> kv_cache_growing;
     if (quantized) {
-        kv_cache_growing.reserve(n_layer);
-        for (int i = 0; i < n_layer; i++) {
+        kv_cache_growing.reserve(model_.config().n_layer);
+        for (int i = 0; i < model_.config().n_layer; i++) {
             kv_cache_growing.emplace_back(
                 mx::array({0.0f}, mx::float32),
                 mx::array({0.0f}, mx::float32));
@@ -357,7 +355,7 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
     }
     mx::array idx(mx::array(tokens.data(), {1, T}, mx::uint32));
     mx::array logits = quantized
-        ? model_.forward_decode_growing(idx, kv_cache_growing, mx::array(0))
+        ? model_.forward_decode_growing(idx, kv_cache_growing, 0)
         : model_.forward_cached(idx, k_cache, v_cache, 0);
     mx::array last = mx::reshape(mx::slice(logits, {0, T - 1, 0}, {1, T, V}), {V});
     uint32_t next = sample_token(last, sampling);
@@ -377,12 +375,12 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
             mx::array idx2(mx::array(window.data(), {1, T}, mx::uint32));
             if (quantized) {
                 kv_cache_growing.clear();
-                for (int i = 0; i < n_layer; i++) {
+                for (int i = 0; i < model_.config().n_layer; i++) {
                     kv_cache_growing.emplace_back(
                         mx::array({0.0f}, mx::float32),
                         mx::array({0.0f}, mx::float32));
                 }
-                logits = model_.forward_decode_growing(idx2, kv_cache_growing, mx::array(0));
+                logits = model_.forward_decode_growing(idx2, kv_cache_growing, 0);
             } else {
                 k_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
                 v_cache = mx::zeros({1, n_head, block_size_, head_dim}, mx::bfloat16);
@@ -392,7 +390,7 @@ BenchmarkResult InferenceEngine::benchmark(const std::string& prompt, int max_to
         } else {
             mx::array one(mx::array(&next, {1, 1}, mx::uint32));
             logits = quantized
-                ? model_.forward_decode_growing(one, kv_cache_growing, mx::array(cached_len))
+                ? model_.forward_decode_growing(one, kv_cache_growing, cached_len)
                 : model_.forward_cached(one, k_cache, v_cache, cached_len);
             cached_len += 1;
         }

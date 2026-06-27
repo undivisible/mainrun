@@ -14,8 +14,8 @@ Benchmarks run on the same Apple Silicon machine (M-series) with the same GPT-st
 |----------|-------------|---------|--------|
 | Training (Muon+AdamW, 3 NS iters) | 687 ms/step | 436 ms/step | C++ 1.6x faster |
 | Forward only (B=32, T=256) | 66 ms | 61 ms | C++ ~8% faster |
-| Inference decode (KV cache, fp32) | 365 tok/s* | 938 tok/s | C++ 2.6x faster |
-| Inference decode (KV cache, 4-bit) | — | 1118 tok/s | C++ only |
+| Inference decode (KV cache, fp32) | 365 tok/s* | 995 tok/s | C++ 2.7x faster |
+| Inference decode (KV cache, 4-bit) | — | 1273 tok/s | C++ only |
 
 *Python inference benchmark is full forward with no KV cache.
 
@@ -39,8 +39,8 @@ Both use the same Muon+AdamW optimizer with 3 Newton-Schulz iterations and `mx.c
 | Variant | Prefill | Decode speed |
 |---------|---------|--------------|
 | Python MLX (full forward, no KV cache) | 4.2 ms (256 tokens) | 365 tok/s |
-| C++ MLX (KV cache, fp32) | 8.5 ms | 938 tok/s |
-| C++ MLX (KV cache, 4-bit) | 5.5 ms | 1118 tok/s |
+| C++ MLX (KV cache, fp32) | 8.8 ms | 995 tok/s |
+| C++ MLX (KV cache, 4-bit) | 5.9 ms | 1273 tok/s |
 
 The C++ inference engine is faster because it:
 
@@ -54,6 +54,7 @@ The C++ inference engine is faster because it:
 - **Inference engine** (`mlx-cpp/inference/`): checkpoint load, tokenizer via Python helper, KV cache, GPU sampling, optional 4-bit quantization.
 - **Compiled SwiGLU** (`mlx-cpp/model.cpp`): gate * sigmoid(gate) * up fused into one kernel.
 - **Fast kernels**: `fast::rope`, `fast::rms_norm`, `fast::scaled_dot_product_attention`, `quantized_matmul`.
+- **Avoid CPU sync in decode loop**: `forward_decode_growing` takes `int prev_len` instead of an array, removing a per-step GPU→CPU sync.
 - **Training engine** (`mlx-cpp/training/`): Muon+AdamW optimizer, gradient clipping, EMA, compiled eval, WSD/cosine LR schedules.
 - **Restructured** `mlx-cpp/` into `inference/` and `training/` folders.
 
@@ -61,7 +62,8 @@ The C++ inference engine is faster because it:
 
 - **ZMLX-style fused rmsnorm+residual**: manual rmsnorm (mean+square+rsqrt) replaced `fast::rms_norm`, which is already a single hand-tuned Metal kernel. Result dropped from 621 tok/s to 86 tok/s. Reverted.
 - **Compiled decode with pre-allocated KV cache**: shape instability from `fast::rope` with array offsets and `split` shape inference failed. Reverted.
-- **Bfloat16 forward pass**: slower due to recompilation overhead.
+- **Compiled growing-cache decode**: `split` cannot infer output shapes with dynamic cache lengths. Reverted.
+- **Float16 inference**: `float16` weights/activations and cache were slower than `bfloat16` (likely due to recompilation overhead). Reverted.
 - **Fused full training step**: marginal gains only; Python still wins.
 
 ## Raw commands
@@ -93,5 +95,5 @@ python3 benchmark_forward_py.py
 ## Notes
 
 - Benchmarks are sensitive to thermal state. Numbers above were taken after a cooldown period.
-- The C++ forward pass is the only workload that beats Python on a like-for-like basis.
-- Inference is the clear win for the C++ engine thanks to the KV cache and GPU sampling.
+- C++ training is now faster than Python after fixing the Python benchmark to actually train.
+- C++ inference is faster than Python thanks to the KV cache, GPU sampling, and 4-bit quantization.

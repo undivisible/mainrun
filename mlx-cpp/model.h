@@ -46,7 +46,7 @@ public:
     mlx::core::array forward_decode_growing(
         const mlx::core::array& idx,
         std::vector<std::pair<mlx::core::array, mlx::core::array>>& kv_cache,
-        const mlx::core::array& prev_len);
+        int prev_len);
 
     std::vector<mlx::core::array*> parameters();
     void set_parameters(const std::vector<mlx::core::array>& params);
@@ -111,7 +111,6 @@ private:
 
     mlx::core::Dtype infer_dtype_ = mlx::core::float32;
     mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)> compiled_decode_fp32_;
-    mutable std::function<std::vector<mlx::core::array>(const std::vector<mlx::core::array>&)> compiled_decode_q_;
 
     static std::vector<Block> make_blocks(std::mt19937& gen, const GPTConfig& cfg, int hd, int hidden);
     void init_rope_cache();

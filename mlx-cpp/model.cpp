@@ -528,10 +528,9 @@ array GPT::forward_cached(const array& idx, array& k_cache, array& v_cache, int 
 array GPT::forward_decode_growing(
     const array& idx,
     std::vector<std::pair<array, array>>& kv_cache,
-    const array& prev_len) {
+    int prev_len) {
     int B = idx.shape(0);
     int T = idx.shape(1);
-    int prev_len_int = prev_len.item<int>();
 
     auto x = take(token_emb_, idx, 0);
     float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
@@ -562,7 +561,7 @@ array GPT::forward_decode_growing(
             k = rmsnorm(k, b.k_norm_w);
         }
 
-        if (prev_len_int == 0) {
+        if (prev_len == 0) {
             kv_cache[li].first = k;
             kv_cache[li].second = v;
         } else {
