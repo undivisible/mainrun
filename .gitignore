@@ -22,3 +22,4 @@ Thumbs.db
 
 mlx-cpp/build/
 mlx-cpp/checkpoint.safetensors
+mlx-cpp/build_asan/

@@ -69,22 +69,11 @@ array GPT::rmsnorm(const array& x, const array& w) {
     return fast::rms_norm(x, w, cfg_.rms_eps);
 }
 
-array GPT::rmsnorm_fast(const array& x, const array& w) {
-    return fast::rms_norm(x, w, cfg_.rms_eps);
-}
-
 array GPT::dropout_(const array& x) {
     if (cfg_.dropout <= 0.0f) return x;
     auto mask = random::bernoulli(1.0f - cfg_.dropout, x.shape());
     float scale = 1.0f / (1.0f - cfg_.dropout);
     return x * where(mask, array(scale), array(0.0f));
-}
-
-array GPT::apply_rope(const array& x, const array& cos, const array& sin) {
-    int half = head_dim_ / 2;
-    auto parts = split(x, Shape{half}, -1);
-    auto rot = concatenate({-parts[1], parts[0]}, -1);
-    return x * cos + rot * sin;
 }
 
 array GPT::make_mask(const array& idx) {
@@ -223,7 +212,7 @@ array GPT::forward_cached(const array& idx,
 
     for (int li = 0; li < (int)blocks_.size(); li++) {
         auto& b = blocks_[li];
-        auto h = rmsnorm_fast(x, b.attn_norm_w);
+        auto h = rmsnorm(x, b.attn_norm_w);
 
         auto h_flat = reshape(h, {B * T, cfg_.d_model});
 
@@ -244,8 +233,8 @@ array GPT::forward_cached(const array& idx,
         k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
 
         if (cfg_.qk_norm) {
-            q = rmsnorm_fast(q, b.q_norm_w);
-            k = rmsnorm_fast(k, b.k_norm_w);
+            q = rmsnorm(q, b.q_norm_w);
+            k = rmsnorm(k, b.k_norm_w);
         }
 
         if (prev_len == 0) {
@@ -268,7 +257,7 @@ array GPT::forward_cached(const array& idx,
             : matmul(attn_out, transpose(b.proj_w, {1, 0}));
         attn_out = reshape(proj_out, {B, T, cfg_.d_model});
 
-        auto m = rmsnorm_fast(x, b.mlp_norm_w);
+        auto m = rmsnorm(x, b.mlp_norm_w);
         auto m_flat = reshape(m, {B * T, cfg_.d_model});
 
         auto gate_flat = quantized_
@@ -290,7 +279,7 @@ array GPT::forward_cached(const array& idx,
         x = x + attn_out + mlp_out;
     }
 
-    x = rmsnorm_fast(x, ln_f_w_);
+    x = rmsnorm(x, ln_f_w_);
     auto x_flat = reshape(x, {B * T, cfg_.d_model});
 
     auto logits_flat = quantized_

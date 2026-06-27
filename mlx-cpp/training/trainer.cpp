@@ -24,17 +24,6 @@ static array cross_entropy_sum(const array& logits, const array& targets) {
   return -sum(picked);
 }
 
-// Clip global grad L2 norm to max_norm. Returns clipped grads (lazy).
-static std::vector<array> clip_grad_norm(const std::vector<array>& grads, float max_norm) {
-  array total_sq = array(0.0f);
-  for (const auto& g : grads) total_sq = total_sq + sum(square(g));
-  array scale = minimum(array(1.0f), array(max_norm) / sqrt(total_sq));
-  std::vector<array> out;
-  out.reserve(grads.size());
-  for (const auto& g : grads) out.push_back(g * scale);
-  return out;
-}
-
 float wsd_lr(int step, int max_steps, float max_lr, float warmup_pct, float decay_pct) {
   int warmup = std::max(1, (int)(max_steps * warmup_pct));
   int decay_start = max_steps - std::max(1, (int)(max_steps * decay_pct));
@@ -298,68 +287,3 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   return best_val;
 }
 
-TrainConfig v9_config() {
-  TrainConfig c;
-  c.max_lr = 0.025f;
-  c.lr_schedule = LrSchedule::Cosine;
-  c.warmup_steps = 50;
-  c.min_lr = 0.001f;
-  return c;
-}
-TrainConfig v10_config() {
-  TrainConfig c;
-  c.d_model = 768; c.n_layer = 6; c.n_head = 12;
-  c.dropout = 0.12f;
-  return c;
-}
-TrainConfig v11_config() {
-  TrainConfig c;
-  c.d_model = 512; c.n_layer = 10; c.n_head = 8;
-  c.dropout = 0.12f;
-  return c;
-}
-TrainConfig v12_config() {
-  TrainConfig c;
-  c.dropout = 0.10f;
-  return c;
-}
-TrainConfig v13_config() {
-  TrainConfig c;
-  return c;
-}
-TrainConfig v14_config() {
-  TrainConfig c;
-  c.dropout = 0.10f;
-  return c;
-}
-
-void run_all_experiments(DataLoader& data) {
-  struct Exp { const char* name; TrainConfig (*cfg)(); };
-  Exp exps[] = {
-    {"v9_cosine_lr",   v9_config},
-    {"v10_wider",      v10_config},
-    {"v11_deeper",     v11_config},
-    {"v12_eff_attn",   v12_config},
-    {"v13_tok_aug",    v13_config},
-    {"v14_adapt_drop", v14_config},
-  };
-
-  std::vector<std::pair<std::string, float>> results;
-  for (auto& e : exps) {
-    fprintf(stderr, "=== Running %s ===\n", e.name);
-    float val = run_training(data, e.cfg());
-    results.push_back({e.name, val});
-  }
-
-  printf("\nRESULTS SUMMARY\n");
-  int best_idx = 0;
-  for (int i = 0; i < (int)results.size(); i++) {
-    float improvement = (BASELINE - results[i].second) / BASELINE * 100.0f;
-    const char* status = (results[i].second < BASELINE) ? "success" : "no_improvement";
-    printf("  %s: val=%.6f improvement=%.2f%% status=%s\n",
-           results[i].first.c_str(), results[i].second, improvement, status);
-    if (results[i].second < results[best_idx].second) best_idx = i;
-  }
-  printf("Best: %s with val=%.6f\n", results[best_idx].first.c_str(), results[best_idx].second);
-  if (results[best_idx].second < BASELINE) printf("BEAT BASELINE!\n");
-}

@@ -96,9 +96,7 @@ private:
     void init_rope_cache();
 
     mlx::core::array rmsnorm(const mlx::core::array& x, const mlx::core::array& w);
-    mlx::core::array rmsnorm_fast(const mlx::core::array& x, const mlx::core::array& w);
     mlx::core::array dropout_(const mlx::core::array& x);
-    mlx::core::array apply_rope(const mlx::core::array& x, const mlx::core::array& cos, const mlx::core::array& sin);
     mlx::core::array make_mask(const mlx::core::array& idx);
 
     // Quantized matmul helper: x @ w.T using quantized weights

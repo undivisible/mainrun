@@ -41,11 +41,3 @@ float cosine_lr(int step, int max_steps, float max_lr, float min_lr, int warmup_
 
 float run_training(DataLoader& data, const TrainConfig& cfg);
 
-TrainConfig v9_config();
-TrainConfig v10_config();
-TrainConfig v11_config();
-TrainConfig v12_config();
-TrainConfig v13_config();
-TrainConfig v14_config();
-
-void run_all_experiments(DataLoader& data);

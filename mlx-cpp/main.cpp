@@ -22,8 +22,6 @@ int main(int argc, char** argv) {
   std::string prompt = "The future of AI is";
   int max_tokens = 100;
   float temperature = 0.8f;
-  int top_k = 50;
-  float top_p = 0.9f;
   bool do_benchmark = false;
   bool use_quantization = false;
 
@@ -48,21 +46,12 @@ int main(int argc, char** argv) {
     else if (a == "--prompt") prompt = next(prompt);
     else if (a == "--max-tokens") max_tokens = std::stoi(next("100"));
     else if (a == "--temperature") temperature = std::stof(next("0.8"));
-    else if (a == "--top-k") top_k = std::stoi(next("50"));
-    else if (a == "--top-p") top_p = std::stof(next("0.9"));
     else if (a == "--benchmark") do_benchmark = true;
     else if (a == "--quantize") use_quantization = true;
     else if (a == "--help" || a == "-h") {
       printf("Usage: %s [subcommand] [options]\n"
              "Subcommands:\n"
              "  train    (default) WSD+Muon+EMA training\n"
-             "  all      Run all experiments v9-v14\n"
-             "  v9       Cosine LR schedule\n"
-             "  v10      Wider model (d_model=768, 6 layers)\n"
-             "  v11      Deeper model (d_model=512, 10 layers)\n"
-             "  v12      Lower dropout (0.10)\n"
-             "  v13      Token augmentation (baseline config)\n"
-             "  v14      Adaptive dropout (0.10)\n"
              "  infer    Load checkpoint, generate text\n"
              "Options:\n"
              "  --max-steps N      (default 889)\n"
@@ -78,8 +67,6 @@ int main(int argc, char** argv) {
              "  --prompt STR       (for infer)\n"
              "  --max-tokens N     (for infer)\n"
              "  --temperature F    (for infer)\n"
-             "  --top-k N          (for infer)\n"
-             "  --top-p F          (for infer)\n"
              "  --benchmark        (for infer)\n"
              "  --quantize         (for infer, 4-bit weight quantization)\n", argv[0]);
       return 0;
@@ -96,7 +83,7 @@ int main(int argc, char** argv) {
     mc.eos_id = data.eos_id();
     InferenceEngine engine(checkpoint, tok_path, mc);
     if (use_quantization) engine.quantize();
-    SamplingConfig s{temperature, top_k, top_p};
+    SamplingConfig s{temperature};
     if (do_benchmark) {
       auto r = engine.benchmark(prompt, max_tokens, s);
       printf("Prompt tokens: %d\nGenerated: %d\nPrefill: %.2fms\nTotal: %.2fs\nTokens/sec: %.2f\n",
@@ -111,24 +98,16 @@ int main(int argc, char** argv) {
 
   DataLoader data(data_path, tok_path, cfg.batch_size, cfg.block_size);
 
-  auto run_exp = [&](TrainConfig c) {
-    if (cfg.max_steps != 889) { c.max_steps = cfg.max_steps; c.eval_interval = cfg.eval_interval; }
-    return run_training(data, c);
-  };
-
-  if (subcommand == "all") {
-    run_all_experiments(data);
-  } else if (subcommand == "v9") run_exp(v9_config());
-  else if (subcommand == "v10") run_exp(v10_config());
-  else if (subcommand == "v11") run_exp(v11_config());
-  else if (subcommand == "v12") run_exp(v12_config());
-  else if (subcommand == "v13") run_exp(v13_config());
-  else if (subcommand == "v14") run_exp(v14_config());
-  else {
-    float best = run_training(data, cfg);
-    printf("Best val: %.6f (baseline: %.6f)\n", best, BASELINE);
-    if (best < BASELINE) printf("BEAT BASELINE!\n");
+  if (subcommand == "all" || subcommand == "v9" || subcommand == "v10" ||
+      subcommand == "v11" || subcommand == "v12" || subcommand == "v13" ||
+      subcommand == "v14") {
+    fprintf(stderr, "experiments v9-v14 removed for postfinal; use 'train'\n");
+    return 1;
   }
+
+  float best = run_training(data, cfg);
+  printf("Best val: %.6f (baseline: %.6f)\n", best, BASELINE);
+  if (best < BASELINE) printf("BEAT BASELINE!\n");
 
   return 0;
 }

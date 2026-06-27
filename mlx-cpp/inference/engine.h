@@ -16,8 +16,6 @@ std::string decode_ids(const std::vector<uint32_t>& ids, const std::string& toke
 
 struct SamplingConfig {
     float temperature = 0.8f;
-    int top_k = 50;
-    float top_p = 0.9f;
 };
 
 struct BenchmarkResult {
