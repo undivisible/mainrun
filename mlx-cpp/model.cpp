@@ -103,8 +103,6 @@ array GPT::forward(const array& idx, bool train) {
     auto x = take(token_emb_, idx, 0);
     if (train) x = dropout_(x);
 
-    auto cos_v = slice(rope_cos_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
-    auto sin_v = slice(rope_sin_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
     auto mask = make_mask(idx);
 
     float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));
@@ -154,8 +152,6 @@ array GPT::forward_functional(const std::vector<array>& params, const array& idx
     auto x = take(token_emb, idx, 0);
     if (train) x = dropout_(x);
 
-    auto cos_v = slice(rope_cos_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
-    auto sin_v = slice(rope_sin_, {0, 0, 0, 0}, {1, 1, T, head_dim_});
     auto mask = make_mask(idx);
 
     float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim_));

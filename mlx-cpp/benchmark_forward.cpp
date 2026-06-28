@@ -8,16 +8,7 @@ using namespace mlx::core;
 int main() {
     GPTConfig cfg;
     cfg.vocab_size = 24000;
-    cfg.block_size = 256;
-    cfg.n_layer = 8;
-    cfg.n_head = 9;
-    cfg.d_model = 576;
     cfg.dropout = 0.0f;
-    cfg.eos_id = 1;
-    cfg.rope_theta = 1000.0f;
-    cfg.qk_norm = true;
-    cfg.rms_eps = 1e-5f;
-    cfg.swiglu_mult = 8.0f / 3.0f;
 
     GPT model(cfg);
     int B = 32, T = 256;

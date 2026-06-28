@@ -148,7 +148,8 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
       for (auto& g : grads) g = g * clip_scale;
 
       // Optimizer inline
-      array momentum_a(0.95f), beta1_a(0.9f), beta2_a(0.95f), eps_a(1e-8f);
+      array momentum_a(0.95f), beta1_a(cfg.beta1), beta2_a(cfg.beta2), eps_a(cfg.eps);
+      array one_minus_b1(1.0f - cfg.beta1), one_minus_b2(1.0f - cfg.beta2);
       std::vector<array> new_params, new_mom, new_am, new_av;
       new_params.reserve(N); new_mom.reserve(N); new_am.reserve(N); new_av.reserve(N);
       for (size_t i = 0; i < N; i++) {
@@ -165,8 +166,8 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
           new_am.push_back(s[N + i]);
           new_av.push_back(s[2 * N + i]);
         } else {
-          auto new_m = s[N + i] * beta1_a + grads[i] * array(0.1f);
-          auto new_v = s[2 * N + i] * beta2_a + square(grads[i]) * array(0.05f);
+          auto new_m = s[N + i] * beta1_a + grads[i] * one_minus_b1;
+          auto new_v = s[2 * N + i] * beta2_a + square(grads[i]) * one_minus_b2;
           auto update = (new_m * inv_bc1) / (sqrt(new_v * inv_bc2) + eps_a);
           new_params.push_back(p[i] * wd_adamw_a - update * adamw_lr_a);
           new_mom.push_back(s[i]);
