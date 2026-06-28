@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 
-const run = (cmd) => execSync(cmd, { cwd: repoRoot, encoding: "utf-8" }).trim();
+const run = (cmd, args) => execFileSync(cmd, args, { cwd: repoRoot, encoding: "utf-8" }).trim();
 
 try {
   const logPath = path.join(repoRoot, "mainrun", "logs", "mainrun.log");
@@ -18,15 +18,15 @@ try {
     console.log(`Moved existing log to: mainrun_${timestamp}.log`);
   }
 
-  run("git add .");
+  run("git", ["add", "-A", "mainrun/", "scripts/", "benchmarks/", "mlx-cpp/", "data/", "docs/", "Taskfile.yml", "BENCHMARKS.md", "README.md", "CONTRIBUTING.md"]);
 
-  const status = run("git status --porcelain");
+  const status = run("git", ["status", "--porcelain"]);
   if (status === "") {
     console.log("No changes to checkpoint");
     process.exit(0);
   }
 
-  run('git commit -m "Mainrun auto checkpoint"');
+  run("git", ["commit", "-m", "Mainrun auto checkpoint"]);
   console.log("Auto checkpoint created");
 } catch (error) {
   if (error.message.includes("nothing to commit")) {

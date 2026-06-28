@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import readline from "node:readline/promises";
@@ -16,7 +16,7 @@ const question = async (prompt) => {
   return answer;
 };
 
-const run = (cmd) => execSync(cmd, { cwd: repoRoot, encoding: "utf-8" }).trim();
+const run = (cmd, args) => execFileSync(cmd, args, { cwd: repoRoot, encoding: "utf-8" }).trim();
 
 try {
   let email;
@@ -34,7 +34,11 @@ try {
   if (!email) {
     email = await question("Please enter your email address: ");
 
-    await fs.writeFile(envPath, `EMAIL=${email}\n`);
+    const existing = existsSync(envPath) ? await fs.readFile(envPath, "utf-8") : "";
+    const updated = existing.match(/^EMAIL=.*$/m)
+      ? existing.replace(/^EMAIL=.*$/m, `EMAIL=${email}`)
+      : `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}EMAIL=${email}\n`;
+    await fs.writeFile(envPath, updated);
     console.log("Email saved for future submissions");
   }
 
@@ -60,15 +64,19 @@ try {
   const zipPath = path.join(repoRoot, "submission.zip");
   if (existsSync(zipPath)) await fs.unlink(zipPath);
 
-  run(
-    `zip -r submission.zip . -x "node_modules/*" -x "mainrun/data/*" -x "mainrun/.venv/*" -x ".git/*" -x "*.zip" -x "*/__pycache__/*" -x "*.DS_Store"`
-  );
+  run("zip", [
+    "-r", "submission.zip", ".",
+    "-x", "node_modules/*", "mainrun/data/*", "mainrun/.venv/*",
+    ".git/*", "*.zip", "*/__pycache__/*", "*.DS_Store",
+  ]);
 
   console.log("Requesting upload URL...");
 
-  const uploadUrl = run(
-    `curl -s "https://api.hanger.maincode.com/api/v1/upload/request?email=${email}&filename=submission.zip"`
-  );
+  const encodedEmail = encodeURIComponent(email);
+  const uploadUrl = run("curl", [
+    "-s",
+    `https://api.hanger.maincode.com/api/v1/upload/request?email=${encodedEmail}&filename=submission.zip`,
+  ]);
 
   if (!uploadUrl || uploadUrl.includes("error")) {
     throw new Error(`Failed to get upload URL: ${uploadUrl}`);
@@ -76,7 +84,7 @@ try {
 
   console.log("Uploading submission...");
 
-  run(`curl -X PUT "${uploadUrl}" --upload-file "${zipPath}"`);
+  run("curl", ["-X", "PUT", uploadUrl, "--upload-file", zipPath]);
 
   await fs.unlink(zipPath);
 
