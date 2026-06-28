@@ -27,15 +27,9 @@ void Optimizer::init(const std::vector<array>& params) {
     bool is_2d = params[i].ndim() == 2;
     bool is_embedding = (i == 0);  // token_emb is first param, 2D but AdamW
     is_muon_[i] = is_2d && !is_embedding;
-    if (is_muon_[i]) {
-      muon_mom_.push_back(zeros_like(params[i]));
-      adamw_m_.push_back(zeros_like(params[i]));
-      adamw_v_.push_back(zeros_like(params[i]));
-    } else {
-      muon_mom_.push_back(zeros_like(params[i]));
-      adamw_m_.push_back(zeros_like(params[i]));
-      adamw_v_.push_back(zeros_like(params[i]));
-    }
+    muon_mom_.push_back(zeros_like(params[i]));
+    adamw_m_.push_back(zeros_like(params[i]));
+    adamw_v_.push_back(zeros_like(params[i]));
   }
   // Build flat state vector: [muon_mom_..., adamw_m_..., adamw_v_...]
   state_.clear();

@@ -56,30 +56,10 @@ struct ModelEMA {
   std::vector<array> swap_out() { return backup; }
 };
 
-// Compiled eval: forward + cross_entropy for a single batch.
-// No randomness (no dropout), so the graph is stable and compilation works.
-static std::vector<array> eval_single_batch_impl(const std::vector<array>& inputs) {
-  extern GPT* g_eval_model;
-  extern int g_eval_B, g_eval_T, g_eval_V;
-  size_t np = inputs.size() - 2;
-  std::vector<array> p(inputs.begin(), inputs.begin() + np);
-  g_eval_model->set_parameters(p);
-  auto logits = g_eval_model->forward(inputs[np], false);
-  auto lf = reshape(logits, {g_eval_B * g_eval_T, g_eval_V});
-  auto tf = reshape(inputs[np + 1], {g_eval_B * g_eval_T});
-  return {cross_entropy_sum(lf, tf)};
-}
-
-GPT* g_eval_model = nullptr;
-int g_eval_B = 0, g_eval_T = 0, g_eval_V = 0;
-
-static float eval_loss_compiled(GPT& model, DataLoader& data,
+static float eval_loss_compiled(DataLoader& data,
                                 const std::function<std::vector<array>(const std::vector<array>&)>& compiled_eval,
                                 const std::vector<array>& params) {
   data.reset_val_ptr();
-  int B = data.batch_size(), T = data.seq_len(), V = data.vocab_size();
-  g_eval_model = &model;
-  g_eval_B = B; g_eval_T = T; g_eval_V = V;
   array total = array(0.0f);
   while (auto b = data.next_val_batch()) {
     auto& [x, y] = *b;
@@ -206,7 +186,17 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
   auto compiled_step = compile(fused_step);  // shapeless default
 
   // Compiled eval function (no dropout → stable graph)
-  auto compiled_eval = compile(std::function<std::vector<array>(const std::vector<array>&)>(eval_single_batch_impl));
+  int eval_B = data.batch_size(), eval_T = data.seq_len(), eval_V = data.vocab_size();
+  auto eval_single_batch = std::function<std::vector<array>(const std::vector<array>&)>(
+    [&model, eval_B, eval_T, eval_V, N](const std::vector<array>& inputs) -> std::vector<array> {
+      std::vector<array> p(inputs.begin(), inputs.begin() + N);
+      model.set_parameters(p);
+      auto logits = model.forward(inputs[N], false);
+      auto lf = reshape(logits, {eval_B * eval_T, eval_V});
+      auto tf = reshape(inputs[N + 1], {eval_B * eval_T});
+      return {cross_entropy_sum(lf, tf)};
+    });
+  auto compiled_eval = compile(eval_single_batch);
 
   // Accumulate loss on GPU to avoid per-step CPU sync
   array loss_accum = array(0.0f);
@@ -261,10 +251,10 @@ float run_training(DataLoader& data, const TrainConfig& cfg) {
       float val_ema = 0.0f;
       if (cfg.use_ema) {
         auto ema_params = ema.swap_in(params);
-        val_ema = eval_loss_compiled(model, data, compiled_eval, ema_params);
+        val_ema = eval_loss_compiled(data, compiled_eval, ema_params);
         model.set_parameters(ema.swap_out());
       } else {
-        val_ema = eval_loss_compiled(model, data, compiled_eval, params);
+        val_ema = eval_loss_compiled(data, compiled_eval, params);
       }
       auto now = std::chrono::high_resolution_clock::now();
       double elapsed = std::chrono::duration<double>(now - t_start).count();

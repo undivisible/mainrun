@@ -91,21 +91,18 @@ static std::string find_python() {
         "../mainrun/.venv/bin/python3",
         "mainrun/.venv/bin/python3",
         "../../mainrun/.venv/bin/python3",
-        "python3",
     };
     for (auto& p : candidates) {
-        pid_t pid = fork();
-        if (pid < 0) continue;
-        if (pid == 0) {
-            const char* argv[] = {p, "-c", "import tokenizers", nullptr};
-            execvp(p, const_cast<char* const*>(argv));
-            _exit(127);
-        }
-        int status = 0;
-        if (waitpid(pid, &status, 0) > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0)
-            return p;
+        if (access(p, X_OK) == 0) return p;
     }
     return "python3";
+}
+
+static void cleanup_tok_script() {
+    if (!tok_script_path.empty()) {
+        unlink(tok_script_path.c_str());
+        tok_script_path.clear();
+    }
 }
 
 static void ensure_tok_script() {
@@ -132,6 +129,7 @@ static void ensure_tok_script() {
         throw std::runtime_error("ensure_tok_script: write failed");
     }
     tok_script_path = template_path;
+    std::atexit(cleanup_tok_script);
     written = true;
 }
 
