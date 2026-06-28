@@ -3,7 +3,7 @@
   
   [![Dev Container](https://img.shields.io/badge/Dev%20Container-Ready-green.svg)](.devcontainer)
   [![Python 3.10](https://img.shields.io/badge/Python-3.10-blue.svg)](https://www.python.org/)
-  [![PyTorch](https://img.shields.io/badge/PyTorch-2.7.1-orange.svg)](https://pytorch.org/)
+  [![PyTorch](https://img.shields.io/badge/PyTorch-2.7.1%2B-orange.svg)](https://pytorch.org/)
 </div>
 
 ## Why Mainrun?

@@ -22,7 +22,8 @@ RUN sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/loc
 
 RUN npm install -g zx
 
-COPY requirements.txt* /tmp/
+COPY requirements.txt* requirements-train.txt* /tmp/
 RUN if [ -f /tmp/requirements.txt ]; then pip3 install --no-cache-dir -r /tmp/requirements.txt; fi
+RUN if [ -f /tmp/requirements-train.txt ]; then pip3 install --no-cache-dir -r /tmp/requirements-train.txt; fi
 
 RUN echo "devcontainer" >> /root/.mainrun

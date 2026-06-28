@@ -24,4 +24,3 @@ tasks:
     dir: scripts
     cmds:
       - npx zx submit.mjs
-    

@@ -1,6 +1,6 @@
 import mlx.core as mx
 import mlx.nn as nn
-import time, json
+import time
 
 vocab_size, n_layer, n_head, d_model = 24000, 8, 9, 576
 head_dim = d_model // n_head

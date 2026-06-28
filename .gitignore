@@ -1,5 +1,6 @@
 mainrun/data/
 mainrun/.venv/
+mainrun/logs/
 
 __pycache__/
 *.py[cod]
@@ -29,3 +30,6 @@ Thumbs.db
 mlx-cpp/build/
 mlx-cpp/checkpoint.safetensors
 mlx-cpp/build_asan/
+
+submission.zip
+data/julien040___hacker-news-posts/
