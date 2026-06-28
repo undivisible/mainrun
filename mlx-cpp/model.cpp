@@ -19,16 +19,17 @@ std::vector<GPT::Block> GPT::make_blocks(std::mt19937& gen, const GPTConfig& cfg
     float std = 0.02f;
     float scaled = std / std::sqrt(2.0f * static_cast<float>(cfg.n_layer));
     for (int i = 0; i < cfg.n_layer; i++) {
-        blocks.emplace_back(
-            ones({cfg.d_model}),
-            normal_array(gen, 0.0f, std, {3 * cfg.d_model, cfg.d_model}),
-            ones({hd}),
-            ones({hd}),
-            normal_array(gen, 0.0f, scaled, {cfg.d_model, cfg.d_model}),
-            ones({cfg.d_model}),
-            normal_array(gen, 0.0f, std, {hidden, cfg.d_model}),
-            normal_array(gen, 0.0f, std, {hidden, cfg.d_model}),
-            normal_array(gen, 0.0f, scaled, {cfg.d_model, hidden}));
+        blocks.push_back(GPT::Block{
+            .attn_norm_w = ones({cfg.d_model}),
+            .qkv_w       = normal_array(gen, 0.0f, std,    {3 * cfg.d_model, cfg.d_model}),
+            .q_norm_w    = ones({hd}),
+            .k_norm_w    = ones({hd}),
+            .proj_w      = normal_array(gen, 0.0f, scaled, {cfg.d_model, cfg.d_model}),
+            .mlp_norm_w  = ones({cfg.d_model}),
+            .w_gate      = normal_array(gen, 0.0f, std,    {hidden, cfg.d_model}),
+            .w_up        = normal_array(gen, 0.0f, std,    {hidden, cfg.d_model}),
+            .w_out       = normal_array(gen, 0.0f, scaled, {cfg.d_model, hidden}),
+        });
     }
     return blocks;
 }
@@ -110,26 +111,8 @@ array GPT::forward(const array& idx, bool train) {
 
     for (auto& b : blocks_) {
         auto h = rmsnorm(x, b.attn_norm_w);
-
         auto h_flat = reshape(h, {B * T, cfg_.d_model});
-        auto qkv_flat = matmul(h_flat, transpose(b.qkv_w, {1, 0}));
-        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
-        auto qkv_parts = split(qkv, 3, -1);
-        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
-        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
-        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
-
-        q = transpose(q, {0, 2, 1, 3});
-        k = transpose(k, {0, 2, 1, 3});
-        v = transpose(v, {0, 2, 1, 3});
-
-        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
-        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
-
-        if (cfg_.qk_norm) {
-            q = rmsnorm(q, b.q_norm_w);
-            k = rmsnorm(k, b.k_norm_w);
-        }
+        auto [q, k, v] = compute_qkv(h_flat, B, T, b.qkv_w, b.q_norm_w, b.k_norm_w, 0, 0);
 
         auto attn_out = fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
 
@@ -139,16 +122,7 @@ array GPT::forward(const array& idx, bool train) {
         attn_out = reshape(attn_out, {B, T, cfg_.d_model});
         if (train) attn_out = dropout_(attn_out);
 
-        auto m = rmsnorm(x, b.mlp_norm_w);
-        auto m_flat = reshape(m, {B * T, cfg_.d_model});
-        auto gate_flat = matmul(m_flat, transpose(b.w_gate, {1, 0}));
-        auto up_flat = matmul(m_flat, transpose(b.w_up, {1, 0}));
-        auto gate = reshape(gate_flat, {B, T, hidden_});
-        auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = compiled_swiglu({gate, up})[0];
-        auto combined_flat = reshape(silu_result, {B * T, hidden_});
-        auto mlp_out_flat = matmul(combined_flat, transpose(b.w_out, {1, 0}));
-        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+        auto mlp_out = compute_mlp(x, B, T, b.mlp_norm_w, b.w_gate, b.w_up, b.w_out, 0);
         if (train) mlp_out = dropout_(mlp_out);
 
         x = x + attn_out + mlp_out;
@@ -198,26 +172,8 @@ array GPT::forward_functional(const std::vector<array>& params, const array& idx
         const array& w_out = params[pi++];
 
         auto h = rmsnorm(x, attn_norm_w);
-
         auto h_flat = reshape(h, {B * T, cfg_.d_model});
-        auto qkv_flat = matmul(h_flat, transpose(qkv_w, {1, 0}));
-        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
-        auto qkv_parts = split(qkv, 3, -1);
-        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
-        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
-        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
-
-        q = transpose(q, {0, 2, 1, 3});
-        k = transpose(k, {0, 2, 1, 3});
-        v = transpose(v, {0, 2, 1, 3});
-
-        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
-        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, 0);
-
-        if (cfg_.qk_norm) {
-            q = rmsnorm(q, q_norm_w);
-            k = rmsnorm(k, k_norm_w);
-        }
+        auto [q, k, v] = compute_qkv(h_flat, B, T, qkv_w, q_norm_w, k_norm_w, 0, 0);
 
         auto attn_out = fast::scaled_dot_product_attention(q, k, v, attn_scale, "", mask);
 
@@ -227,16 +183,7 @@ array GPT::forward_functional(const std::vector<array>& params, const array& idx
         attn_out = reshape(attn_out, {B, T, cfg_.d_model});
         if (train) attn_out = dropout_(attn_out);
 
-        auto m = rmsnorm(x, mlp_norm_w);
-        auto m_flat = reshape(m, {B * T, cfg_.d_model});
-        auto gate_flat = matmul(m_flat, transpose(w_gate, {1, 0}));
-        auto up_flat = matmul(m_flat, transpose(w_up, {1, 0}));
-        auto gate = reshape(gate_flat, {B, T, hidden_});
-        auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = compiled_swiglu({gate, up})[0];
-        auto combined_flat = reshape(silu_result, {B * T, hidden_});
-        auto mlp_out_flat = matmul(combined_flat, transpose(w_out, {1, 0}));
-        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+        auto mlp_out = compute_mlp(x, B, T, mlp_norm_w, w_gate, w_up, w_out, 0);
         if (train) mlp_out = dropout_(mlp_out);
 
         x = x + attn_out + mlp_out;
@@ -267,8 +214,59 @@ GPT::QuantW GPT::quantize_weight(const array& w) {
     return {result[0], result[1], result[2]};
 }
 
-array GPT::qmatmul(const array& x, const QuantW& qw) {
+array GPT::qmatmul(const array& x, const QuantW& qw) const {
     return quantized_matmul(x, qw.w, qw.scales, qw.biases, true);
+}
+
+GPT::QKV GPT::compute_qkv(const array& h_flat, int B, int T,
+                          const array& qkv_w, const array& q_norm_w,
+                          const array& k_norm_w, int layer_idx, int offset) const {
+    auto qkv_flat = quantized_
+        ? qmatmul(h_flat, q_qkv_[layer_idx])
+        : matmul(h_flat, transpose(qkv_w, {1, 0}));
+    auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
+    auto qkv_parts = split(qkv, 3, -1);
+    auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
+    auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
+    auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
+
+    q = transpose(q, {0, 2, 1, 3});
+    k = transpose(k, {0, 2, 1, 3});
+    v = transpose(v, {0, 2, 1, 3});
+
+    q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, offset);
+    k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, offset);
+
+    if (cfg_.qk_norm) {
+        q = rmsnorm(q, q_norm_w);
+        k = rmsnorm(k, k_norm_w);
+    }
+
+    return {std::move(q), std::move(k), std::move(v)};
+}
+
+array GPT::compute_mlp(const array& x, int B, int T,
+                       const array& mlp_norm_w, const array& w_gate,
+                       const array& w_up, const array& w_out,
+                       int layer_idx) const {
+    auto m = rmsnorm(x, mlp_norm_w);
+    auto m_flat = reshape(m, {B * T, cfg_.d_model});
+
+    auto gate_flat = quantized_
+        ? qmatmul(m_flat, q_gate_[layer_idx])
+        : matmul(m_flat, transpose(w_gate, {1, 0}));
+    auto up_flat = quantized_
+        ? qmatmul(m_flat, q_up_[layer_idx])
+        : matmul(m_flat, transpose(w_up, {1, 0}));
+    auto gate = reshape(gate_flat, {B, T, hidden_});
+    auto up = reshape(up_flat, {B, T, hidden_});
+    auto silu_result = compiled_swiglu({gate, up})[0];
+    auto combined_flat = reshape(silu_result, {B * T, hidden_});
+
+    auto mlp_out_flat = quantized_
+        ? qmatmul(combined_flat, q_out_[layer_idx])
+        : matmul(combined_flat, transpose(w_out, {1, 0}));
+    return reshape(mlp_out_flat, {B, T, cfg_.d_model});
 }
 
 void GPT::quantize_for_inference() {
@@ -443,29 +441,8 @@ array GPT::forward_cached(const array& idx, array& k_cache, array& v_cache, int 
     for (int li = 0; li < (int)blocks_.size(); li++) {
         auto& b = blocks_[li];
         auto h = rmsnorm(x, b.attn_norm_w);
-
         auto h_flat = reshape(h, {B * T, cfg_.d_model});
-
-        auto qkv_flat = quantized_
-            ? qmatmul(h_flat, q_qkv_[li])
-            : matmul(h_flat, transpose(b.qkv_w, {1, 0}));
-        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
-        auto qkv_parts = split(qkv, 3, -1);
-        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
-        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
-        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
-
-        q = transpose(q, {0, 2, 1, 3});
-        k = transpose(k, {0, 2, 1, 3});
-        v = transpose(v, {0, 2, 1, 3});
-
-        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
-        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
-
-        if (cfg_.qk_norm) {
-            q = rmsnorm(q, b.q_norm_w);
-            k = rmsnorm(k, b.k_norm_w);
-        }
+        auto [q, k, v] = compute_qkv(h_flat, B, T, b.qkv_w, b.q_norm_w, b.k_norm_w, li, prev_len);
 
         // Reshape K/V so the leading dimension is the index length and the
         // remaining dimensions match the cache slice shape for scatter.
@@ -487,24 +464,7 @@ array GPT::forward_cached(const array& idx, array& k_cache, array& v_cache, int 
             : matmul(attn_out, transpose(b.proj_w, {1, 0}));
         attn_out = reshape(proj_out, {B, T, cfg_.d_model});
 
-        auto m = rmsnorm(x, b.mlp_norm_w);
-        auto m_flat = reshape(m, {B * T, cfg_.d_model});
-
-        auto gate_flat = quantized_
-            ? qmatmul(m_flat, q_gate_[li])
-            : matmul(m_flat, transpose(b.w_gate, {1, 0}));
-        auto up_flat = quantized_
-            ? qmatmul(m_flat, q_up_[li])
-            : matmul(m_flat, transpose(b.w_up, {1, 0}));
-        auto gate = reshape(gate_flat, {B, T, hidden_});
-        auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = compiled_swiglu({gate, up})[0];
-        auto combined_flat = reshape(silu_result, {B * T, hidden_});
-
-        auto mlp_out_flat = quantized_
-            ? qmatmul(combined_flat, q_out_[li])
-            : matmul(combined_flat, transpose(b.w_out, {1, 0}));
-        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+        auto mlp_out = compute_mlp(x, B, T, b.mlp_norm_w, b.w_gate, b.w_up, b.w_out, li);
 
         x = x + attn_out + mlp_out;
     }
@@ -534,28 +494,8 @@ array GPT::forward_decode_growing(
     for (int li = 0; li < (int)blocks_.size(); li++) {
         auto& b = blocks_[li];
         auto h = rmsnorm(x, b.attn_norm_w);
-
         auto h_flat = reshape(h, {B * T, cfg_.d_model});
-        auto qkv_flat = quantized_
-            ? qmatmul(h_flat, q_qkv_[li])
-            : matmul(h_flat, transpose(b.qkv_w, {1, 0}));
-        auto qkv = reshape(qkv_flat, {B, T, 3 * cfg_.d_model});
-        auto qkv_parts = split(qkv, 3, -1);
-        auto q = reshape(qkv_parts[0], {B, T, cfg_.n_head, head_dim_});
-        auto k = reshape(qkv_parts[1], {B, T, cfg_.n_head, head_dim_});
-        auto v = reshape(qkv_parts[2], {B, T, cfg_.n_head, head_dim_});
-
-        q = transpose(q, {0, 2, 1, 3});
-        k = transpose(k, {0, 2, 1, 3});
-        v = transpose(v, {0, 2, 1, 3});
-
-        q = fast::rope(q, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
-        k = fast::rope(k, head_dim_, false, cfg_.rope_theta, 1.0f, prev_len);
-
-        if (cfg_.qk_norm) {
-            q = rmsnorm(q, b.q_norm_w);
-            k = rmsnorm(k, b.k_norm_w);
-        }
+        auto [q, k, v] = compute_qkv(h_flat, B, T, b.qkv_w, b.q_norm_w, b.k_norm_w, li, prev_len);
 
         if (prev_len == 0) {
             kv_cache[li].first = k;
@@ -578,24 +518,7 @@ array GPT::forward_decode_growing(
             : matmul(attn_out, transpose(b.proj_w, {1, 0}));
         attn_out = reshape(proj_out, {B, T, cfg_.d_model});
 
-        auto m = rmsnorm(x, b.mlp_norm_w);
-        auto m_flat = reshape(m, {B * T, cfg_.d_model});
-
-        auto gate_flat = quantized_
-            ? qmatmul(m_flat, q_gate_[li])
-            : matmul(m_flat, transpose(b.w_gate, {1, 0}));
-        auto up_flat = quantized_
-            ? qmatmul(m_flat, q_up_[li])
-            : matmul(m_flat, transpose(b.w_up, {1, 0}));
-        auto gate = reshape(gate_flat, {B, T, hidden_});
-        auto up = reshape(up_flat, {B, T, hidden_});
-        auto silu_result = compiled_swiglu({gate, up})[0];
-        auto combined_flat = reshape(silu_result, {B * T, hidden_});
-
-        auto mlp_out_flat = quantized_
-            ? qmatmul(combined_flat, q_out_[li])
-            : matmul(combined_flat, transpose(b.w_out, {1, 0}));
-        auto mlp_out = reshape(mlp_out_flat, {B, T, cfg_.d_model});
+        auto mlp_out = compute_mlp(x, B, T, b.mlp_norm_w, b.w_gate, b.w_up, b.w_out, li);
 
         x = x + attn_out + mlp_out;
     }

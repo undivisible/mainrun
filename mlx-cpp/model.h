@@ -80,12 +80,6 @@ private:
         mlx::core::array w_gate;
         mlx::core::array w_up;
         mlx::core::array w_out;
-        Block(mlx::core::array a, mlx::core::array b, mlx::core::array c,
-              mlx::core::array d, mlx::core::array e, mlx::core::array f,
-              mlx::core::array g, mlx::core::array h, mlx::core::array i)
-            : attn_norm_w(std::move(a)), qkv_w(std::move(b)), q_norm_w(std::move(c)),
-              k_norm_w(std::move(d)), proj_w(std::move(e)), mlp_norm_w(std::move(f)),
-              w_gate(std::move(g)), w_up(std::move(h)), w_out(std::move(i)) {}
     };
 
     std::vector<Block> blocks_;
@@ -123,6 +117,23 @@ private:
     mlx::core::array make_mask(const mlx::core::array& idx) const;
 
     // Quantized matmul helper: x @ w.T using quantized weights
-    mlx::core::array qmatmul(const mlx::core::array& x, const QuantW& qw);
+    mlx::core::array qmatmul(const mlx::core::array& x, const QuantW& qw) const;
     static QuantW quantize_weight(const mlx::core::array& w);
+
+    // Shared per-layer helpers (reduce duplication across forward variants).
+    // Returns {q, k, v} transposed to [B, n_head, T, head_dim] with RoPE + QK-norm applied.
+    // If quantized_, uses q_qkv_[layer_idx] for the matmul (ignores qkv_w).
+    struct QKV { mlx::core::array q, k, v; };
+    QKV compute_qkv(const mlx::core::array& h_flat, int B, int T,
+                    const mlx::core::array& qkv_w,
+                    const mlx::core::array& q_norm_w,
+                    const mlx::core::array& k_norm_w,
+                    int layer_idx, int offset) const;
+    // Returns mlp_out [B, T, d_model]. If quantized_, uses q_gate_/q_up_/q_out_.
+    mlx::core::array compute_mlp(const mlx::core::array& x, int B, int T,
+                                 const mlx::core::array& mlp_norm_w,
+                                 const mlx::core::array& w_gate,
+                                 const mlx::core::array& w_up,
+                                 const mlx::core::array& w_out,
+                                 int layer_idx) const;
 };
